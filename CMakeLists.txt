@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(mpmc VERSION 1.0 LANGUAGES CXX)
+project(MPMC_Memory_Management VERSION 1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,18 +7,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Enable compile_commands.json generation for Clangd
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_executable(mpmc
+set(MPMC_TARGET mpmc_memory_management)
+
+add_executable(${MPMC_TARGET}
     src/main.cpp
     src/os_memory.cpp
     src/utils.cpp
 )
 
-target_include_directories(mpmc PRIVATE include)
+target_include_directories(${MPMC_TARGET} PRIVATE include)
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-    target_compile_definitions(mpmc PRIVATE HFT_TARGET_ARM64=1)
+    target_compile_definitions(${MPMC_TARGET} PRIVATE HFT_TARGET_ARM64=1)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    target_compile_definitions(mpmc PRIVATE HFT_TARGET_X86_64=1)
+    target_compile_definitions(${MPMC_TARGET} PRIVATE HFT_TARGET_X86_64=1)
 endif()
 
 # Automatically symlink compile_commands.json to the project root for Clangd

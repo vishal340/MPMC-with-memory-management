@@ -1,6 +1,6 @@
-# mpmc
+# MPMC with Memory Management
 
-A small C++ project template.
+Multi-producer multi-consumer queue with OS-backed memory management for fixed-size exchange protocol messages (NASDAQ ITCH, OUCH, NSE MTBT, NNF). Bypasses the C++ default allocator via `mmap`/`VirtualAlloc`, with x86_64 and ARM64 selected at compile time.
 
 ## How to Build
 
@@ -8,5 +8,5 @@ A small C++ project template.
 mkdir build && cd build
 cmake ..
 cmake --build .
-./mpmc
+./mpmc_memory_management
 ```
