@@ -1,5 +1,6 @@
 #pragma once
 
+#include <frame.hpp>
 #include <protocols.hpp>
 
 #include <cstddef>
@@ -38,7 +39,6 @@ struct MtbtDecodedOrder {
          out.message_type == MtbtNewOrder::kTypeCancel;
 }
 
-// Wire layout: [STREAM_HEADER 8 B][order body 26 B]
 [[nodiscard]] inline bool decode_mtbt_order(const void* wire, std::size_t len,
                                             MtbtDecodedOrder& out) noexcept {
   if (wire == nullptr || len < kMtbtOrderWireSize) {
@@ -56,6 +56,42 @@ struct MtbtDecodedOrder {
 
   return decode_mtbt_order_body(bytes + MtbtStreamHeader::kWireSize,
                                 len - MtbtStreamHeader::kWireSize, out.order);
+}
+
+// MTBT frame: [STREAM_HEADER][body] packets back-to-back; msg_len is full packet size.
+template <typename Handler>
+[[nodiscard]] inline frame::Stats split_mtbt_frame(const std::byte* frame,
+                                                   std::size_t len,
+                                                   Handler&& on_packet) noexcept {
+  frame::Stats stats{};
+  if (frame == nullptr) {
+    return stats;
+  }
+
+  std::size_t offset = 0;
+  while (offset + MtbtStreamHeader::kWireSize <= len) {
+    MtbtStreamHeader header{};
+    if (!decode_mtbt_stream_header(frame + offset, len - offset, header)) {
+      break;
+    }
+
+    const auto packet_len = static_cast<std::size_t>(header.msg_len);
+    if (packet_len < MtbtStreamHeader::kWireSize ||
+        offset + packet_len > len) {
+      break;
+    }
+
+    if (!on_packet(frame + offset, packet_len, header)) {
+      ++stats.skipped;
+    } else {
+      ++stats.saved;
+    }
+
+    offset += packet_len;
+  }
+
+  stats.consumed = offset;
+  return stats;
 }
 
 } // namespace hft::proto

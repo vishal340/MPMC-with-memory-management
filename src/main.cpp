@@ -1,12 +1,64 @@
 #include <arch.hpp>
+#include <frame.hpp>
+#include <frame_ingress.hpp>
 #include <memory_pool.hpp>
 #include <mpmc.hpp>
-#include <mtbt_decode.hpp>
 #include <protocols.hpp>
 
 #include <array>
 #include <cstdio>
 #include <cstring>
+
+namespace {
+
+void append_itch_add_order(std::array<std::byte, hft::frame::kCapacity>& frame,
+                           std::size_t& offset, std::uint16_t stock_locate,
+                           std::uint32_t shares) {
+  hft::proto::ItchAddOrder body{};
+  body.stock_locate = stock_locate;
+  body.shares = shares;
+  std::memcpy(body.stock, "AAPL    ", 8);
+
+  const auto body_len = static_cast<std::uint16_t>(hft::proto::ItchAddOrder::kWireSize);
+  frame[offset++] = static_cast<std::byte>(body_len >> 8);
+  frame[offset++] = static_cast<std::byte>(body_len & 0xFF);
+  std::memcpy(frame.data() + offset, &body, sizeof(body));
+  offset += sizeof(body);
+}
+
+void append_mtbt_order(std::array<std::byte, hft::frame::kCapacity>& frame,
+                       std::size_t& offset, std::int16_t stream_id,
+                       std::int32_t token, std::int32_t quantity) {
+  hft::proto::MtbtStreamHeader header{};
+  header.msg_len =
+      static_cast<std::int16_t>(hft::proto::kMtbtOrderWireSize);
+  header.stream_id = stream_id;
+  header.seq_no = static_cast<std::int32_t>(offset);
+
+  hft::proto::MtbtNewOrder body{};
+  body.token = token;
+  body.quantity = quantity;
+  body.order_type = 'B';
+
+  std::memcpy(frame.data() + offset, &header, sizeof(header));
+  offset += sizeof(header);
+  std::memcpy(frame.data() + offset, &body, sizeof(body));
+  offset += sizeof(body);
+}
+
+hft::proto::ItchAddOrder as_itch(const hft::proto::TaggedMessage& tagged) {
+  hft::proto::ItchAddOrder msg{};
+  std::memcpy(&msg, tagged.bytes.data(), sizeof(msg));
+  return msg;
+}
+
+hft::proto::MtbtNewOrder as_mtbt(const hft::proto::TaggedMessage& tagged) {
+  hft::proto::MtbtNewOrder msg{};
+  std::memcpy(&msg, tagged.bytes.data(), sizeof(msg));
+  return msg;
+}
+
+} // namespace
 
 int main() {
   std::printf("target arch: %s (x86_64=%d arm64=%d page=%zu)\n",
@@ -14,68 +66,47 @@ int main() {
               hft::arch::page_size);
 
   hft::mem::ProtocolArena<1024, 1024, 1024, 256> arena;
-
   hft::MPMC<4096> queue;
 
-  auto* itch = arena.acquire_itch();
-  if (itch == nullptr) {
+  std::array<std::byte, hft::frame::kCapacity> itch_frame{};
+  std::size_t itch_len = 0;
+  append_itch_add_order(itch_frame, itch_len, 10, 100);
+  append_itch_add_order(itch_frame, itch_len, 20, 200);
+  append_itch_add_order(itch_frame, itch_len, 30, 300);
+
+  int queue_slot = 0;
+  const auto itch_stats = hft::ingress::ingest_itch_frame(
+      itch_frame.data(), itch_len, arena, queue, queue_slot);
+  if (itch_stats.saved != 3 || itch_stats.skipped != 0) {
     return 1;
   }
-  itch->stock_locate = 42;
-  itch->shares = 100;
-  std::memcpy(itch->stock, "AAPL    ", 8);
 
-  hft::proto::TaggedMessage tagged{};
-  arena.copy_to_tagged(*itch, tagged);
-  arena.release(itch);
+  std::array<std::byte, hft::frame::kCapacity> mtbt_frame{};
+  std::size_t mtbt_len = 0;
+  append_mtbt_order(mtbt_frame, mtbt_len, 1, 111, 10);
+  append_mtbt_order(mtbt_frame, mtbt_len, 2, 222, 20);
 
-  queue.push(0, tagged);
-  const hft::proto::TaggedMessage out = queue.pop(0);
-
-  if (out.kind != hft::proto::Kind::itch) {
+  const auto mtbt_stats = hft::ingress::ingest_mtbt_frame(
+      mtbt_frame.data(), mtbt_len, arena, queue, queue_slot);
+  if (mtbt_stats.saved != 2 || mtbt_stats.skipped != 0) {
     return 2;
   }
 
-  hft::proto::ItchAddOrder decoded{};
-  std::memcpy(&decoded, out.bytes.data(), sizeof(decoded));
-  if (decoded.stock_locate != 42 || decoded.shares != 100) {
+  const auto itch_a = as_itch(queue.pop(0));
+  const auto itch_b = as_itch(queue.pop(1));
+  const auto itch_c = as_itch(queue.pop(2));
+  const auto mtbt_a = as_mtbt(queue.pop(3));
+  const auto mtbt_b = as_mtbt(queue.pop(4));
+
+  if (itch_a.stock_locate != 10 || itch_b.stock_locate != 20 ||
+      itch_c.stock_locate != 30) {
     return 3;
   }
-
-  std::printf("os-backed pool + mpmc ok: itch locate=%u shares=%u\n",
-              decoded.stock_locate, decoded.shares);
-
-  std::array<std::byte, hft::proto::kMtbtOrderWireSize> wire{};
-  hft::proto::MtbtStreamHeader hdr{};
-  hdr.msg_len = static_cast<std::int16_t>(hft::proto::kMtbtOrderWireSize);
-  hdr.stream_id = 7;
-  hdr.seq_no = 99;
-  std::memcpy(wire.data(), &hdr, sizeof(hdr));
-
-  hft::proto::MtbtNewOrder wire_body{};
-  wire_body.token = 12345;
-  wire_body.quantity = 50;
-  wire_body.order_type = 'B';
-  std::memcpy(wire.data() + hft::proto::MtbtStreamHeader::kWireSize, &wire_body,
-              sizeof(wire_body));
-
-  hft::proto::MtbtDecodedOrder mtbt{};
-  if (!hft::proto::decode_mtbt_order(wire.data(), wire.size(), mtbt)) {
+  if (mtbt_a.token != 111 || mtbt_b.token != 222) {
     return 4;
   }
-  if (mtbt.header.stream_id != 7 || mtbt.order.token != 12345 ||
-      mtbt.order.quantity != 50) {
-    return 5;
-  }
 
-  auto* mtbt_slot = arena.acquire_mtbt();
-  if (mtbt_slot == nullptr) {
-    return 6;
-  }
-  *mtbt_slot = mtbt.order;
-  arena.release(mtbt_slot);
-
-  std::printf("mtbt decode ok: stream=%d token=%d qty=%d\n", mtbt.header.stream_id,
-              mtbt.order.token, mtbt.order.quantity);
+  std::printf("frame ingress ok: itch_saved=%zu mtbt_saved=%zu\n",
+              itch_stats.saved, mtbt_stats.saved);
   return 0;
 }
