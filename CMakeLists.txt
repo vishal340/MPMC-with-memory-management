@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 project(MPMC_Memory_Management VERSION 1.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Enable compile_commands.json generation for Clangd
@@ -12,7 +12,6 @@ set(MPMC_TARGET mpmc_memory_management)
 add_executable(${MPMC_TARGET}
     src/main.cpp
     src/os_memory.cpp
-    src/utils.cpp
 )
 
 target_include_directories(${MPMC_TARGET} PRIVATE include)

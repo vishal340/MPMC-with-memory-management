@@ -1,8 +1,10 @@
 #include <arch.hpp>
 #include <memory_pool.hpp>
 #include <mpmc.hpp>
+#include <mtbt_decode.hpp>
 #include <protocols.hpp>
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 
@@ -42,5 +44,38 @@ int main() {
 
   std::printf("os-backed pool + mpmc ok: itch locate=%u shares=%u\n",
               decoded.stock_locate, decoded.shares);
+
+  std::array<std::byte, hft::proto::kMtbtOrderWireSize> wire{};
+  hft::proto::MtbtStreamHeader hdr{};
+  hdr.msg_len = static_cast<std::int16_t>(hft::proto::kMtbtOrderWireSize);
+  hdr.stream_id = 7;
+  hdr.seq_no = 99;
+  std::memcpy(wire.data(), &hdr, sizeof(hdr));
+
+  hft::proto::MtbtNewOrder wire_body{};
+  wire_body.token = 12345;
+  wire_body.quantity = 50;
+  wire_body.order_type = 'B';
+  std::memcpy(wire.data() + hft::proto::MtbtStreamHeader::kWireSize, &wire_body,
+              sizeof(wire_body));
+
+  hft::proto::MtbtDecodedOrder mtbt{};
+  if (!hft::proto::decode_mtbt_order(wire.data(), wire.size(), mtbt)) {
+    return 4;
+  }
+  if (mtbt.header.stream_id != 7 || mtbt.order.token != 12345 ||
+      mtbt.order.quantity != 50) {
+    return 5;
+  }
+
+  auto* mtbt_slot = arena.acquire_mtbt();
+  if (mtbt_slot == nullptr) {
+    return 6;
+  }
+  *mtbt_slot = mtbt.order;
+  arena.release(mtbt_slot);
+
+  std::printf("mtbt decode ok: stream=%d token=%d qty=%d\n", mtbt.header.stream_id,
+              mtbt.order.token, mtbt.order.quantity);
   return 0;
 }
