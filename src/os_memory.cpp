@@ -17,6 +17,13 @@
 
 namespace hft::os {
 
+namespace detail {
+
+Region map_impl(std::size_t bytes, std::size_t alignment, MapFlags flags,
+                bool shared);
+
+} // namespace detail
+
 void Region::release() noexcept {
   if (base_ == nullptr) {
     return;
@@ -33,6 +40,17 @@ void Region::release() noexcept {
 }
 
 Region map(std::size_t bytes, std::size_t alignment, MapFlags flags) {
+  return detail::map_impl(bytes, alignment, flags, false);
+}
+
+Region map_shared(std::size_t bytes, std::size_t alignment, MapFlags flags) {
+  return detail::map_impl(bytes, alignment, flags, true);
+}
+
+namespace detail {
+
+Region map_impl(const std::size_t bytes, const std::size_t alignment,
+                const MapFlags flags, const bool shared) {
   if (bytes == 0) {
     throw std::invalid_argument("os::map: bytes must be > 0");
   }
@@ -51,7 +69,7 @@ Region map(std::size_t bytes, std::size_t alignment, MapFlags flags) {
     throw std::runtime_error("VirtualAlloc failed");
   }
 #else
-  int map_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+  int map_flags = (shared ? MAP_SHARED : MAP_PRIVATE) | MAP_ANONYMOUS;
 #if defined(MAP_HUGETLB)
   if (has_flag(flags, MapFlags::huge_page_hint)) {
     map_flags |= MAP_HUGETLB;
@@ -62,7 +80,7 @@ Region map(std::size_t bytes, std::size_t alignment, MapFlags flags) {
   if (base == MAP_FAILED) {
     if (has_flag(flags, MapFlags::huge_page_hint)) {
       base = mmap(nullptr, mapped_bytes, PROT_READ | PROT_WRITE,
-                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                  (shared ? MAP_SHARED : MAP_PRIVATE) | MAP_ANONYMOUS, -1, 0);
     }
     if (base == MAP_FAILED) {
       throw std::runtime_error(std::string("mmap failed: ") + std::strerror(errno));
@@ -88,5 +106,7 @@ Region map(std::size_t bytes, std::size_t alignment, MapFlags flags) {
 
   return Region(base, mapped_bytes);
 }
+
+} // namespace detail
 
 } // namespace hft::os
