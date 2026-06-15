@@ -136,6 +136,34 @@ struct NnfMessageHeader {
 
 #pragma pack(pop)
 
+enum class Kind : std::uint8_t {
+  itch = 1,
+  ouch = 2,
+  mtbt = 3,
+  nnf = 4,
+  signal = 5,
+};
+
+enum class Side : std::int16_t { none = 0, buy = 1, sell = -1 };
+
+#pragma pack(push, 1)
+
+struct StrategySignal {
+  static constexpr std::size_t kWireSize = 39;
+
+  Kind feed{Kind::itch};
+  Side side{Side::none};
+  std::int32_t price{};
+  std::int32_t quantity{};
+  std::uint32_t order_token{};
+  char stock[8]{};
+  std::int32_t token{};
+  char symbol[10]{};
+  char series[2]{};
+};
+
+#pragma pack(pop)
+
 static_assert(sizeof(ItchAddOrder) == ItchAddOrder::kWireSize);
 static_assert(sizeof(OuchEnterOrder) == OuchEnterOrder::kWireSize);
 static_assert(sizeof(MtbtStreamHeader) == MtbtStreamHeader::kWireSize);
@@ -147,14 +175,9 @@ static_assert(sizeof(NnfMessageHeader) == NnfMessageHeader::kWireSize);
 static_assert(std::is_trivially_copyable_v<ItchAddOrder>);
 static_assert(std::is_trivially_copyable_v<OuchEnterOrder>);
 static_assert(std::is_trivially_copyable_v<MtbtNewOrder>);
+static_assert(sizeof(StrategySignal) == StrategySignal::kWireSize);
 static_assert(std::is_trivially_copyable_v<NnfOrderEntry>);
-
-enum class Kind : std::uint8_t {
-  itch = 1,
-  ouch = 2,
-  mtbt = 3,
-  nnf = 4,
-};
+static_assert(std::is_trivially_copyable_v<StrategySignal>);
 
 template <typename T>
 inline constexpr Kind kind_of = Kind::itch;
@@ -178,13 +201,16 @@ inline constexpr std::size_t slot_size(Kind kind) noexcept {
     return sizeof(MtbtNewOrder);
   case Kind::nnf:
     return sizeof(NnfOrderEntry);
+  case Kind::signal:
+    return sizeof(StrategySignal);
   }
   return 0;
 }
 
 inline constexpr std::size_t max_slot_size() noexcept {
   return std::max({sizeof(ItchAddOrder), sizeof(OuchEnterOrder),
-                   sizeof(MtbtNewOrder), sizeof(NnfOrderEntry)});
+                   sizeof(MtbtNewOrder), sizeof(NnfOrderEntry),
+                   sizeof(StrategySignal)});
 }
 
 template <typename T>
