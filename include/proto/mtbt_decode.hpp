@@ -1,7 +1,7 @@
 #pragma once
 
-#include <frame.hpp>
-#include <protocols.hpp>
+#include <feed/frame.hpp>
+#include <proto/protocols.hpp>
 
 #include <cstddef>
 #include <cstdint>

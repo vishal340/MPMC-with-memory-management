@@ -1,9 +1,9 @@
 #pragma once
 
-#include <arch.hpp>
-#include <data.hpp>
-#include <os_memory.hpp>
-#include <utils.hpp>
+#include <core/arch.hpp>
+#include <mpmc/data.hpp>
+#include <mem/os_memory.hpp>
+#include <core/utils.hpp>
 
 #include <atomic>
 #include <cstddef>

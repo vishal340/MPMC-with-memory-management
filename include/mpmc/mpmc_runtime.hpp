@@ -1,7 +1,7 @@
 #pragma once
 
-#include <mpmc.hpp>
-#include <protocols.hpp>
+#include <mpmc/mpmc.hpp>
+#include <proto/protocols.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -12,7 +12,7 @@
 #include <thread>
 #include <vector>
 
-#include <utils.hpp>
+#include <core/utils.hpp>
 
 namespace hft::mpmc {
 

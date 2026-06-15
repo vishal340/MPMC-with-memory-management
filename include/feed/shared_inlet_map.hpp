@@ -1,7 +1,7 @@
 #pragma once
 
-#include <os_memory.hpp>
-#include <shared_inlet.hpp>
+#include <mem/os_memory.hpp>
+#include <feed/shared_inlet.hpp>
 
 namespace hft::feed {
 

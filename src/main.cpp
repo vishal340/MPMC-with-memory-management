@@ -1,14 +1,14 @@
-#include <arch.hpp>
-#include <consumer.hpp>
-#include <feed_reader.hpp>
-#include <frame.hpp>
-#include <lz4_codec.hpp>
-#include <memory_pool.hpp>
-#include <mpmc_runtime.hpp>
-#include <mtbt_decode.hpp>
-#include <producer.hpp>
-#include <protocols.hpp>
-#include <shared_inlet_map.hpp>
+#include <core/arch.hpp>
+#include <trading/consumer.hpp>
+#include <feed/feed_reader.hpp>
+#include <feed/frame.hpp>
+#include <codec/lz4_codec.hpp>
+#include <mem/memory_pool.hpp>
+#include <mpmc/mpmc_runtime.hpp>
+#include <proto/mtbt_decode.hpp>
+#include <trading/producer.hpp>
+#include <proto/protocols.hpp>
+#include <feed/shared_inlet_map.hpp>
 
 #include <array>
 #include <chrono>

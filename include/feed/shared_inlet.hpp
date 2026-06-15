@@ -1,7 +1,7 @@
 #pragma once
 
-#include <arch.hpp>
-#include <frame.hpp>
+#include <core/arch.hpp>
+#include <feed/frame.hpp>
 
 #include <array>
 #include <atomic>
@@ -9,7 +9,7 @@
 #include <cstdint>
 #include <cstring>
 
-#include <utils.hpp>
+#include <core/utils.hpp>
 
 namespace hft::feed {
 

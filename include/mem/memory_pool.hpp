@@ -1,8 +1,8 @@
 #pragma once
 
-#include <arch.hpp>
-#include <os_memory.hpp>
-#include <protocols.hpp>
+#include <core/arch.hpp>
+#include <mem/os_memory.hpp>
+#include <proto/protocols.hpp>
 
 #include <atomic>
 #include <cstddef>

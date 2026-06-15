@@ -1,7 +1,7 @@
 #pragma once
 
-#include <arch.hpp>
-#include <protocols.hpp>
+#include <core/arch.hpp>
+#include <proto/protocols.hpp>
 
 #include <atomic>
 #include <cstdint>

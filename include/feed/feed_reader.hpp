@@ -7,13 +7,13 @@
 #include <cstring>
 #include <thread>
 
-#include <frame.hpp>
-#include <frame_ingress.hpp>
-#include <lz4_codec.hpp>
-#include <memory_pool.hpp>
-#include <mpmc.hpp>
-#include <shared_inlet.hpp>
-#include <utils.hpp>
+#include <feed/frame.hpp>
+#include <feed/frame_ingress.hpp>
+#include <codec/lz4_codec.hpp>
+#include <mem/memory_pool.hpp>
+#include <mpmc/mpmc.hpp>
+#include <feed/shared_inlet.hpp>
+#include <core/utils.hpp>
 
 namespace hft::feed {
 

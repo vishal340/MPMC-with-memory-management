@@ -1,8 +1,8 @@
 #pragma once
 
-#include <mpmc.hpp>
-#include <protocols.hpp>
-#include <strategy.hpp>
+#include <mpmc/mpmc.hpp>
+#include <proto/protocols.hpp>
+#include <trading/strategy.hpp>
 
 #include <atomic>
 #include <cstring>

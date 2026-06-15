@@ -1,11 +1,11 @@
 #pragma once
 
-#include <frame.hpp>
-#include <itch_decode.hpp>
-#include <memory_pool.hpp>
-#include <mpmc.hpp>
-#include <mtbt_decode.hpp>
-#include <protocols.hpp>
+#include <feed/frame.hpp>
+#include <proto/itch_decode.hpp>
+#include <mem/memory_pool.hpp>
+#include <mpmc/mpmc.hpp>
+#include <proto/mtbt_decode.hpp>
+#include <proto/protocols.hpp>
 
 #include <cstring>
 
