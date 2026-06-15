@@ -21,7 +21,7 @@ enum class Kind : std::uint8_t {
 
 enum class InletFlags : std::uint16_t {
   none = 0,
-  lzo_compressed = 1 << 0,
+  lz4_compressed = 1 << 0,
 };
 
 constexpr InletFlags operator|(InletFlags lhs, InletFlags rhs) noexcept {

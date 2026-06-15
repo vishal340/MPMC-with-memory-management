@@ -11,19 +11,19 @@ set(MPMC_TARGET mpmc_memory_management)
 
 add_executable(${MPMC_TARGET}
     src/main.cpp
-    src/lzo.cpp
+    src/lz4_codec.cpp
     src/os_memory.cpp
 )
 
 target_include_directories(${MPMC_TARGET} PRIVATE include)
 
-find_path(LZO2_INCLUDE_DIR NAMES lzo/lzo1x.h)
-find_library(LZO2_LIBRARY NAMES lzo2)
-if(NOT LZO2_INCLUDE_DIR OR NOT LZO2_LIBRARY)
-    message(FATAL_ERROR "LZO2 not found; install lzo (e.g. brew install lzo)")
+find_path(LZ4_INCLUDE_DIR NAMES lz4.h)
+find_library(LZ4_LIBRARY NAMES lz4)
+if(NOT LZ4_INCLUDE_DIR OR NOT LZ4_LIBRARY)
+    message(FATAL_ERROR "LZ4 not found; install lz4 (e.g. brew install lz4)")
 endif()
-target_include_directories(${MPMC_TARGET} PRIVATE ${LZO2_INCLUDE_DIR})
-target_link_libraries(${MPMC_TARGET} PRIVATE ${LZO2_LIBRARY})
+target_include_directories(${MPMC_TARGET} PRIVATE ${LZ4_INCLUDE_DIR})
+target_link_libraries(${MPMC_TARGET} PRIVATE ${LZ4_LIBRARY})
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
     target_compile_definitions(${MPMC_TARGET} PRIVATE HFT_TARGET_ARM64=1)

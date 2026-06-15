@@ -7,6 +7,6 @@
 #include <cstdint>
 
 struct Node {
+  hft::proto::TaggedMessage message{};
   std::atomic<std::uint8_t> state{0};
-  alignas(hft::arch::cache_line_size) hft::proto::TaggedMessage message{};
 };

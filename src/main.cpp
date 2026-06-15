@@ -1,7 +1,7 @@
 #include <arch.hpp>
 #include <feed_reader.hpp>
 #include <frame.hpp>
-#include <lzo.hpp>
+#include <lz4_codec.hpp>
 #include <memory_pool.hpp>
 #include <mpmc.hpp>
 #include <mtbt_decode.hpp>
@@ -69,10 +69,6 @@ int main() {
               hft::arch::name, hft::arch::is_x86_64, hft::arch::is_arm64,
               hft::arch::page_size);
 
-  if (!hft::lzo::init()) {
-    return 1;
-  }
-
   hft::mem::ProtocolArena<1024, 1024, 1024, 256> arena;
   hft::MPMC<4096> queue;
 
@@ -108,14 +104,14 @@ int main() {
 
   std::array<std::byte, hft::frame::kCapacity> compressed{};
   std::size_t compressed_len = 0;
-  if (!hft::lzo::compress(mtbt_plain.data(), mtbt_plain_len, compressed.data(),
+  if (!hft::lz4::compress(mtbt_plain.data(), mtbt_plain_len, compressed.data(),
                           compressed.size(), compressed_len)) {
     reader.stop();
     return 2;
   }
 
   hft::feed::publish(*inlet, hft::feed::Kind::mtbt,
-                     hft::feed::InletFlags::lzo_compressed, compressed.data(),
+                     hft::feed::InletFlags::lz4_compressed, compressed.data(),
                      compressed_len,
                      static_cast<std::uint32_t>(mtbt_plain_len));
   hft::feed::wait_until_processed(*inlet, 3);
@@ -135,7 +131,7 @@ int main() {
     return 4;
   }
 
-  std::printf("feed reader ok: itch=%u/%u mtbt=%d/%d/%d lzo=%s\n",
+  std::printf("feed reader ok: itch=%u/%u mtbt=%d/%d/%d lz4=%s\n",
               itch_a.stock_locate, itch_b.stock_locate, mtbt_a.token, mtbt_b.token,
               mtbt_c.token, compressed_len < mtbt_plain_len ? "yes" : "no");
   return 0;

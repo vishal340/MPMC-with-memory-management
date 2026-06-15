@@ -9,7 +9,7 @@
 
 #include <frame.hpp>
 #include <frame_ingress.hpp>
-#include <lzo.hpp>
+#include <lz4_codec.hpp>
 #include <memory_pool.hpp>
 #include <mpmc.hpp>
 #include <shared_inlet.hpp>
@@ -80,14 +80,14 @@ private:
       const std::byte* frame_data = inlet_->payload.data();
       std::size_t frame_len = payload_len;
 
-      if (kind == Kind::mtbt && has_flag(flags, InletFlags::lzo_compressed)) {
+      if (kind == Kind::mtbt && has_flag(flags, InletFlags::lz4_compressed)) {
         std::size_t decoded_len = 0;
         const std::size_t expected = inlet_->header.uncompressed_len;
         if (expected == 0 || expected > scratch.size()) {
           last_sequence_ = sequence;
           continue;
         }
-        if (!hft::lzo::decompress(frame_data, frame_len, scratch.data(),
+        if (!hft::lz4::decompress(frame_data, frame_len, scratch.data(),
                                   scratch.size(), decoded_len) ||
             decoded_len != expected) {
           last_sequence_ = sequence;
