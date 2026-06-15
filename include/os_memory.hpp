@@ -66,10 +66,10 @@ private:
 };
 
 [[nodiscard]] Region map(std::size_t bytes, std::size_t alignment,
-                         MapFlags flags = MapFlags::none);
+                         MapFlags flags = MapFlags::none) noexcept;
 
 [[nodiscard]] Region map_shared(std::size_t bytes, std::size_t alignment,
-                                MapFlags flags = MapFlags::none);
+                                MapFlags flags = MapFlags::none) noexcept;
 
 template <typename T> [[nodiscard]] T *placement_construct(void *storage) {
   return new (storage) T{};

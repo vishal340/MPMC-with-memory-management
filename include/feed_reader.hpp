@@ -30,12 +30,11 @@ public:
 
   void start(SharedInlet* inlet,
              hft::mem::ProtocolArena<ItchCap, OuchCap, MtbtCap, NnfCap>& arena,
-             hft::MPMC<QueueCap>& queue, int queue_slot) {
+             hft::MPMC<QueueCap>& queue) {
     stop();
     inlet_ = inlet;
     arena_ = &arena;
     queue_ = &queue;
-    queue_slot_ = queue_slot;
     last_sequence_ = inlet_->header.sequence.load(std::memory_order_acquire);
     running_.store(true, std::memory_order_release);
     thread_ = std::thread([this] { run(); });
@@ -99,10 +98,10 @@ private:
 
       if (kind == Kind::itch) {
         (void)hft::ingress::ingest_itch_frame(frame_data, frame_len, *arena_,
-                                              *queue_, queue_slot_);
+                                              *queue_);
       } else if (kind == Kind::mtbt) {
         (void)hft::ingress::ingest_mtbt_frame(frame_data, frame_len, *arena_,
-                                              *queue_, queue_slot_);
+                                              *queue_);
       }
 
       last_sequence_ = sequence;
@@ -113,7 +112,6 @@ private:
   SharedInlet* inlet_{nullptr};
   hft::mem::ProtocolArena<ItchCap, OuchCap, MtbtCap, NnfCap>* arena_{nullptr};
   hft::MPMC<QueueCap>* queue_{nullptr};
-  int queue_slot_{0};
   std::uint64_t last_sequence_{0};
   std::atomic<bool> running_{false};
   std::thread thread_;

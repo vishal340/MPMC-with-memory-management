@@ -17,6 +17,8 @@ add_executable(${MPMC_TARGET}
 
 target_include_directories(${MPMC_TARGET} PRIVATE include)
 
+target_compile_options(${MPMC_TARGET} PRIVATE -fno-exceptions)
+
 find_path(LZ4_INCLUDE_DIR NAMES lz4.h)
 find_library(LZ4_LIBRARY NAMES lz4)
 if(NOT LZ4_INCLUDE_DIR OR NOT LZ4_LIBRARY)

@@ -1,9 +1,8 @@
 #include <os_memory.hpp>
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
-#include <stdexcept>
-#include <string>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -19,8 +18,10 @@ namespace hft::os {
 
 namespace detail {
 
+[[noreturn]] inline void map_abort() noexcept { std::abort(); }
+
 Region map_impl(std::size_t bytes, std::size_t alignment, MapFlags flags,
-                bool shared);
+                bool shared) noexcept;
 
 } // namespace detail
 
@@ -39,23 +40,24 @@ void Region::release() noexcept {
   mapped_bytes_ = 0;
 }
 
-Region map(std::size_t bytes, std::size_t alignment, MapFlags flags) {
+Region map(std::size_t bytes, std::size_t alignment, MapFlags flags) noexcept {
   return detail::map_impl(bytes, alignment, flags, false);
 }
 
-Region map_shared(std::size_t bytes, std::size_t alignment, MapFlags flags) {
+Region map_shared(std::size_t bytes, std::size_t alignment,
+                    MapFlags flags) noexcept {
   return detail::map_impl(bytes, alignment, flags, true);
 }
 
 namespace detail {
 
 Region map_impl(const std::size_t bytes, const std::size_t alignment,
-                const MapFlags flags, const bool shared) {
+                const MapFlags flags, const bool shared) noexcept {
   if (bytes == 0) {
-    throw std::invalid_argument("os::map: bytes must be > 0");
+    map_abort();
   }
   if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
-    throw std::invalid_argument("os::map: alignment must be a power of two");
+    map_abort();
   }
 
   const std::size_t aligned_bytes = arch::round_up(bytes, alignment);
@@ -66,7 +68,7 @@ Region map_impl(const std::size_t bytes, const std::size_t alignment,
   void* base = VirtualAlloc(nullptr, mapped_bytes, MEM_COMMIT | MEM_RESERVE,
                             PAGE_READWRITE);
   if (base == nullptr) {
-    throw std::runtime_error("VirtualAlloc failed");
+    map_abort();
   }
 #else
   int map_flags = (shared ? MAP_SHARED : MAP_PRIVATE) | MAP_ANONYMOUS;
@@ -83,7 +85,7 @@ Region map_impl(const std::size_t bytes, const std::size_t alignment,
                   (shared ? MAP_SHARED : MAP_PRIVATE) | MAP_ANONYMOUS, -1, 0);
     }
     if (base == MAP_FAILED) {
-      throw std::runtime_error(std::string("mmap failed: ") + std::strerror(errno));
+      map_abort();
     }
   }
 
@@ -99,7 +101,7 @@ Region map_impl(const std::size_t bytes, const std::size_t alignment,
   if (has_flag(flags, MapFlags::locked)) {
     if (mlock(base, mapped_bytes) != 0) {
       munmap(base, mapped_bytes);
-      throw std::runtime_error(std::string("mlock failed: ") + std::strerror(errno));
+      map_abort();
     }
   }
 #endif

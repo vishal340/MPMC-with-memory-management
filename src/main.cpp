@@ -3,15 +3,17 @@
 #include <frame.hpp>
 #include <lz4_codec.hpp>
 #include <memory_pool.hpp>
-#include <mpmc.hpp>
+#include <mpmc_runtime.hpp>
 #include <mtbt_decode.hpp>
 #include <protocols.hpp>
 #include <shared_inlet_map.hpp>
 
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <new>
+#include <thread>
 
 namespace {
 
@@ -76,9 +78,8 @@ int main() {
   hft::feed::SharedInlet* inlet = hft::feed::map_inlet(inlet_region);
   new (inlet) hft::feed::SharedInlet{};
 
-  int queue_slot = 0;
   hft::feed::Reader<1024, 1024, 1024, 256, 4096> reader;
-  reader.start(inlet, arena, queue, queue_slot);
+  reader.start(inlet, arena, queue);
 
   std::array<std::byte, hft::frame::kCapacity> itch_frame{};
   std::size_t itch_len = 0;
@@ -118,11 +119,11 @@ int main() {
 
   reader.stop();
 
-  const auto itch_a = as_itch(queue.pop(0));
-  const auto itch_b = as_itch(queue.pop(1));
-  const auto mtbt_a = as_mtbt(queue.pop(2));
-  const auto mtbt_b = as_mtbt(queue.pop(3));
-  const auto mtbt_c = as_mtbt(queue.pop(4));
+  const auto itch_a = as_itch(queue.pop());
+  const auto itch_b = as_itch(queue.pop());
+  const auto mtbt_a = as_mtbt(queue.pop());
+  const auto mtbt_b = as_mtbt(queue.pop());
+  const auto mtbt_c = as_mtbt(queue.pop());
 
   if (itch_a.stock_locate != 10 || itch_b.stock_locate != 20) {
     return 3;
@@ -134,5 +135,23 @@ int main() {
   std::printf("feed reader ok: itch=%u/%u mtbt=%d/%d/%d lz4=%s\n",
               itch_a.stock_locate, itch_b.stock_locate, mtbt_a.token, mtbt_b.token,
               mtbt_c.token, compressed_len < mtbt_plain_len ? "yes" : "no");
+
+  hft::mpmc::Runtime<4096> runtime(queue);
+  runtime.start(12345);
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  runtime.stop();
+
+  while (runtime.popped() < runtime.pushed()) {
+    hft::proto::TaggedMessage msg{};
+    if (!queue.try_pop(msg)) {
+      break;
+    }
+    (void)hft::mpmc::sequence_from(msg);
+  }
+
+  std::printf("mpmc runtime ok: pushed=%llu popped=%llu live=%zu\n",
+              static_cast<unsigned long long>(runtime.pushed()),
+              static_cast<unsigned long long>(runtime.popped()),
+              runtime.live_threads());
   return 0;
 }
