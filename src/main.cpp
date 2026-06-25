@@ -1,5 +1,6 @@
 #include <core/arch.hpp>
 #include <trading/consumer.hpp>
+#include <trading/gateway.hpp>
 #include <feed/feed_reader.hpp>
 #include <feed/frame.hpp>
 #include <codec/lz4_codec.hpp>
@@ -8,6 +9,7 @@
 #include <proto/mtbt_decode.hpp>
 #include <trading/producer.hpp>
 #include <proto/protocols.hpp>
+#include <proto/sbe/decode.hpp>
 #include <feed/shared_inlet_map.hpp>
 
 #include <array>
@@ -78,11 +80,36 @@ void route_market_tick(const hft::proto::TaggedMessage &msg,
 
 void drain_signals(hft::trading::OuchConsumer<kQueueCap, kQueueCap> &ouch,
                    hft::trading::NnfConsumer<kQueueCap, kQueueCap> &nnf,
+                   hft::trading::SbeOrderEntryConsumer<kQueueCap, kQueueCap> &sbe,
                    std::size_t rounds) {
   for (std::size_t i = 0; i < rounds; ++i) {
     ouch.poll_once();
     nnf.poll_once();
+    sbe.poll_once();
   }
+}
+
+void drain_gateway(hft::trading::ExchangeGateway<kQueueCap, kQueueCap> &gateway,
+                   std::size_t rounds) {
+  for (std::size_t i = 0; i < rounds; ++i) {
+    gateway.poll_once();
+  }
+}
+
+hft::proto::sbe::BestObRpi make_sbe_bbo(std::int64_t bid, std::int64_t ask,
+                                        std::int8_t price_exp) {
+  hft::proto::sbe::BestObRpi tick{};
+  tick.body.bid_normal_price = bid;
+  tick.body.ask_normal_price = ask;
+  tick.body.bid_normal_size = 100;
+  tick.body.ask_normal_size = 100;
+  tick.body.price_exponent = price_exp;
+  tick.body.size_exponent = 0;
+  tick.body.u = 1;
+  const char *sym = "BTCUSDT";
+  tick.symbol_len = 7;
+  std::memcpy(tick.symbol, sym, tick.symbol_len);
+  return tick;
 }
 
 } // namespace
@@ -95,7 +122,8 @@ int main() {
   hft::mem::ProtocolArena<1024, 1024, 1024, 256> arena;
   hft::MPMC<kQueueCap> market_queue;
   hft::MPMC<kQueueCap> signal_queue;
-  hft::MPMC<kQueueCap> order_queue;
+  hft::MPMC<kQueueCap> pending_queue;
+  hft::MPMC<kQueueCap> confirm_queue;
 
   hft::os::Region inlet_region;
   hft::feed::SharedInlet *inlet = hft::feed::map_inlet(inlet_region);
@@ -147,9 +175,13 @@ int main() {
   hft::trading::MtbtProducer<kQueueCap, kQueueCap> mtbt_producer(market_queue,
                                                                  signal_queue);
   hft::trading::OuchConsumer<kQueueCap, kQueueCap> ouch_consumer(signal_queue,
-                                                                 order_queue);
+                                                                 pending_queue);
   hft::trading::NnfConsumer<kQueueCap, kQueueCap> nnf_consumer(signal_queue,
-                                                               order_queue);
+                                                               pending_queue);
+  hft::trading::SbeOrderEntryConsumer<kQueueCap, kQueueCap> sbe_consumer(
+      signal_queue, pending_queue, 1001);
+  hft::trading::ExchangeGateway<kQueueCap, kQueueCap> gateway(pending_queue,
+                                                               confirm_queue);
 
   for (std::size_t i = 0; i < 16; ++i) {
     hft::proto::TaggedMessage market_msg{};
@@ -159,27 +191,126 @@ int main() {
     route_market_tick(market_msg, itch_producer, mtbt_producer);
   }
 
-  drain_signals(ouch_consumer, nnf_consumer, 16);
+  drain_signals(ouch_consumer, nnf_consumer, sbe_consumer, 16);
+  drain_gateway(gateway, 16);
 
-  std::size_t ouch_orders = 0;
-  std::size_t nnf_orders = 0;
+  std::size_t ouch_confirmed = 0;
+  std::size_t nnf_confirmed = 0;
   for (std::size_t i = 0; i < 16; ++i) {
-    hft::proto::TaggedMessage order{};
-    if (!order_queue.try_pop(order)) {
+    hft::proto::TaggedMessage confirm{};
+    if (!confirm_queue.try_pop(confirm)) {
       break;
     }
-    if (order.kind == hft::proto::Kind::ouch) {
-      ++ouch_orders;
-    } else if (order.kind == hft::proto::Kind::nnf) {
-      ++nnf_orders;
+    if (confirm.kind == hft::proto::Kind::ouch_confirm) {
+      ++ouch_confirmed;
+    } else if (confirm.kind == hft::proto::Kind::nnf_confirm) {
+      ++nnf_confirmed;
     }
   }
 
   std::printf(
-      "strategy ok: itch_signals=%llu mtbt_signals=%llu ouch=%zu nnf=%zu\n",
+      "strategy ok: itch_signals=%llu mtbt_signals=%llu "
+      "ouch_submitted=%llu nnf_submitted=%llu ouch_confirmed=%zu nnf_confirmed=%zu\n",
       static_cast<unsigned long long>(itch_producer.signals_emitted()),
       static_cast<unsigned long long>(mtbt_producer.signals_emitted()),
-      ouch_orders, nnf_orders);
+      static_cast<unsigned long long>(ouch_consumer.orders_submitted()),
+      static_cast<unsigned long long>(nnf_consumer.orders_submitted()),
+      ouch_confirmed, nnf_confirmed);
+
+  hft::MPMC<kQueueCap> sbe_market_queue;
+  hft::MPMC<kQueueCap> sbe_signal_queue;
+  hft::MPMC<kQueueCap> sbe_pending_queue;
+  hft::MPMC<kQueueCap> sbe_confirm_queue;
+
+  hft::trading::SbeBboProducer<kQueueCap, kQueueCap> sbe_producer(
+      sbe_market_queue, sbe_signal_queue);
+  hft::trading::SbeOrderEntryConsumer<kQueueCap, kQueueCap> sbe_order_consumer(
+      sbe_signal_queue, sbe_pending_queue, 1001);
+  hft::trading::ExchangeGateway<kQueueCap, kQueueCap> sbe_gateway(
+      sbe_pending_queue, sbe_confirm_queue);
+
+  const auto bbo_ref = make_sbe_bbo(6500000, 6500100, -2);
+  const auto bbo_buy = make_sbe_bbo(6400000, 6400100, -2);
+
+  hft::proto::TaggedMessage bbo_msg{};
+  bbo_msg.kind = hft::proto::Kind::sbe_market;
+  std::memcpy(bbo_msg.bytes.data(), &bbo_ref, sizeof(bbo_ref));
+  sbe_market_queue.push(bbo_msg);
+
+  hft::proto::TaggedMessage bbo_msg2{};
+  bbo_msg2.kind = hft::proto::Kind::sbe_market;
+  std::memcpy(bbo_msg2.bytes.data(), &bbo_buy, sizeof(bbo_buy));
+  sbe_market_queue.push(bbo_msg2);
+
+  for (std::size_t i = 0; i < 8; ++i) {
+    hft::proto::TaggedMessage tick{};
+    if (!sbe_market_queue.try_pop(tick)) {
+      break;
+    }
+    if (tick.kind == hft::proto::Kind::sbe_market) {
+      hft::proto::sbe::BestObRpi decoded{};
+      std::memcpy(&decoded, tick.bytes.data(), sizeof(decoded));
+      sbe_producer.on_tick(decoded);
+    }
+  }
+
+  for (std::size_t i = 0; i < 8; ++i) {
+    sbe_order_consumer.poll_once();
+  }
+  drain_gateway(sbe_gateway, 8);
+
+  std::size_t sbe_confirmed = 0;
+  for (std::size_t i = 0; i < 8; ++i) {
+    hft::proto::TaggedMessage confirm{};
+    if (!sbe_confirm_queue.try_pop(confirm)) {
+      break;
+    }
+    if (confirm.kind == hft::proto::Kind::sbe_fast_order) {
+      ++sbe_confirmed;
+    }
+  }
+
+  std::array<std::byte, 512> wire{};
+  const std::size_t wire_len =
+      hft::proto::sbe::encode_create_order_req(
+          [] {
+            hft::proto::sbe::CreateOrderReqV5 req{};
+            req.symbol_id = 1001;
+            req.side = hft::proto::sbe::SideType::buy;
+            req.qty.mantissa = 10;
+            req.price.mantissa = 65000;
+            return req;
+          }(),
+          wire.data(), wire.size());
+
+  hft::proto::sbe::CreateOrderReqV5 decoded_req{};
+  const bool req_ok =
+      hft::proto::sbe::decode_create_order_req(wire.data(), wire_len, decoded_req);
+
+  hft::proto::sbe::FastOrderResp fast{};
+  fast.body.category = 1;
+  fast.body.side = 1;
+  fast.body.price = 65000;
+  fast.body.leaves_qty = 10;
+  fast.body.symbol_id = 1001;
+  fast.order_id_len = 3;
+  std::memcpy(fast.order_id, "oid", 3);
+
+  std::array<std::byte, 256> fast_wire{};
+  const std::size_t fast_wire_len = hft::proto::sbe::encode_fast_order_resp(
+      fast, fast_wire.data(), fast_wire.size());
+
+  hft::proto::sbe::FastOrderResp decoded_fast{};
+  const bool fast_ok = hft::proto::sbe::decode_fast_order_resp(
+      fast_wire.data(), fast_wire_len, decoded_fast);
+
+  std::printf(
+      "sbe ok: bbo_signals=%llu submitted=%llu confirmed=%zu req_decode=%d "
+      "fast_decode=%d symbol_id=%lld\n",
+      static_cast<unsigned long long>(sbe_producer.signals_emitted()),
+      static_cast<unsigned long long>(sbe_order_consumer.orders_submitted()),
+      sbe_confirmed, req_ok ? 1 : 0, fast_ok ? 1 : 0,
+      static_cast<long long>(decoded_req.symbol_id));
 
   hft::mpmc::Runtime<kQueueCap> runtime(market_queue);
   runtime.start(12345);
