@@ -5,6 +5,7 @@
 #include <mem/memory_pool.hpp>
 #include <mpmc/mpmc.hpp>
 #include <proto/mtbt_decode.hpp>
+#include <proto/mcx/order.hpp>
 #include <proto/protocols.hpp>
 
 #include <cstring>
@@ -70,6 +71,28 @@ template <std::size_t ItchCap, std::size_t OuchCap, std::size_t MtbtCap,
         queue.push(tagged);
         return true;
       });
+}
+
+template <int QueueCap>
+[[nodiscard]] inline frame::Stats ingest_mcx_tob_frame(
+    const std::byte *frame, std::size_t len,
+    hft::MPMC<QueueCap> &queue) noexcept {
+  frame::Stats stats{};
+  if (frame == nullptr || len != hft::proto::mcx::TopOfBook::kWireSize) {
+    return stats;
+  }
+
+  hft::proto::mcx::TopOfBook tick{};
+  std::memcpy(&tick, frame, sizeof(tick));
+
+  hft::proto::TaggedMessage tagged{};
+  tagged.kind = hft::proto::Kind::mcx_market;
+  std::memcpy(tagged.bytes.data(), &tick, sizeof(tick));
+  queue.push(tagged);
+
+  stats.saved = 1;
+  stats.consumed = len;
+  return stats;
 }
 
 } // namespace hft::ingress

@@ -189,4 +189,67 @@ private:
   std::atomic<std::uint64_t> signals_{0};
 };
 
+template <int MarketCap, int SignalCap>
+class McxTobProducer {
+public:
+  McxTobProducer(hft::MPMC<MarketCap> &market_queue,
+                 hft::MPMC<SignalCap> &signal_queue,
+                 std::int32_t band_bps = strategy::kDefaultBandBps) noexcept
+      : market_queue_(market_queue), signal_queue_(signal_queue),
+        band_bps_(band_bps) {}
+
+  [[nodiscard]] std::uint64_t signals_emitted() const noexcept {
+    return signals_.load(std::memory_order_acquire);
+  }
+
+  void poll_once() noexcept {
+    hft::proto::TaggedMessage msg{};
+    if (!market_queue_.try_pop(msg) ||
+        msg.kind != hft::proto::Kind::mcx_market) {
+      return;
+    }
+
+    hft::proto::mcx::TopOfBook tick{};
+    std::memcpy(&tick, msg.bytes.data(), sizeof(tick));
+    on_tick(tick);
+  }
+
+  void on_tick(const hft::proto::mcx::TopOfBook &tick) noexcept {
+    const std::int32_t mid =
+        static_cast<std::int32_t>((tick.bid_price + tick.ask_price) / 2);
+    ref_price_ = strategy::update_ref_price(ref_price_, mid);
+    const hft::proto::Side side =
+        strategy::evaluate(ref_price_, mid, band_bps_);
+    if (side == hft::proto::Side::none) {
+      return;
+    }
+
+    hft::proto::StrategySignal signal{};
+    signal.feed = hft::proto::Kind::mcx_market;
+    signal.side = side;
+    signal.price = mid;
+    signal.quantity = static_cast<std::int32_t>(tick.bid_qty);
+    signal.order_token = next_token_.fetch_add(1, std::memory_order_relaxed);
+    signal.token = static_cast<std::int32_t>(tick.simple_security_id);
+    const std::size_t sym_len =
+        std::min<std::size_t>(sizeof(signal.symbol) - 1,
+                              strnlen(tick.symbol, sizeof(tick.symbol)));
+    std::memcpy(signal.symbol, tick.symbol, sym_len);
+    signal.symbol[sym_len] = '\0';
+
+    hft::proto::TaggedMessage out{};
+    strategy::encode_signal(signal, out);
+    signal_queue_.push(out);
+    signals_.fetch_add(1, std::memory_order_relaxed);
+  }
+
+private:
+  hft::MPMC<MarketCap> &market_queue_;
+  hft::MPMC<SignalCap> &signal_queue_;
+  std::int32_t band_bps_{strategy::kDefaultBandBps};
+  std::int32_t ref_price_{0};
+  std::atomic<std::uint32_t> next_token_{1};
+  std::atomic<std::uint64_t> signals_{0};
+};
+
 } // namespace hft::trading

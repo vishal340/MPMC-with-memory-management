@@ -17,6 +17,7 @@ enum class Kind : std::uint8_t {
   none = 0,
   itch = 1,
   mtbt = 2,
+  mcx = 3,
 };
 
 enum class InletFlags : std::uint16_t {

@@ -102,6 +102,9 @@ private:
       } else if (kind == Kind::mtbt) {
         (void)hft::ingress::ingest_mtbt_frame(frame_data, frame_len, *arena_,
                                               *queue_);
+      } else if (kind == Kind::mcx) {
+        (void)hft::ingress::ingest_mcx_tob_frame(frame_data, frame_len,
+                                                 *queue_);
       }
 
       last_sequence_ = sequence;

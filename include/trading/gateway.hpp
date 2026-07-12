@@ -84,6 +84,22 @@ make_sbe_fast_confirm(const proto::sbe::CreateOrderReqV5 &req,
   return ack;
 }
 
+inline proto::mcx::ExecutionReportNew
+make_mcx_confirm(const proto::mcx::NewOrderSingleShort &req,
+                 std::uint64_t order_id, std::uint64_t exec_id) noexcept {
+  proto::mcx::ExecutionReportNew ack{};
+  ack.msg_seq_num = req.msg_seq_num;
+  ack.order_id = order_id;
+  ack.cl_ord_id = req.cl_ord_id;
+  ack.simple_security_id =
+      static_cast<std::int64_t>(req.simple_security_id);
+  ack.exec_id = exec_id;
+  ack.ord_status = static_cast<char>(proto::mcx::OrdStatus::new_);
+  ack.exec_type = static_cast<char>(proto::mcx::ExecType::new_);
+  ack.exec_restatement_reason = proto::mcx::kExecRestatementOrderAdded;
+  return ack;
+}
+
 } // namespace detail
 
 template <int PendingCap, int ConfirmCap>
@@ -139,6 +155,19 @@ public:
       std::memcpy(confirm.bytes.data(), &ack, sizeof(ack));
       break;
     }
+    case proto::Kind::mcx_order: {
+      proto::mcx::NewOrderSingleShort req{};
+      std::memcpy(&req, pending.bytes.data(), sizeof(req));
+      const auto order_id =
+          next_mcx_order_.fetch_add(1, std::memory_order_relaxed);
+      const auto exec_id =
+          next_mcx_exec_.fetch_add(1, std::memory_order_relaxed);
+      const proto::mcx::ExecutionReportNew ack =
+          detail::make_mcx_confirm(req, order_id, exec_id);
+      confirm.kind = proto::Kind::mcx_confirm;
+      std::memcpy(confirm.bytes.data(), &ack, sizeof(ack));
+      break;
+    }
     default:
       return;
     }
@@ -153,6 +182,8 @@ private:
   std::atomic<std::uint64_t> next_ouch_ref_{1};
   std::atomic<std::uint64_t> next_nnf_order_{1};
   std::atomic<std::uint64_t> next_sbe_seq_{1};
+  std::atomic<std::uint64_t> next_mcx_order_{1};
+  std::atomic<std::uint64_t> next_mcx_exec_{1};
   std::atomic<std::uint64_t> confirms_{0};
 };
 

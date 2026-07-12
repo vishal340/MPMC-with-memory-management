@@ -2,6 +2,8 @@
 #include <trading/consumer.hpp>
 #include <trading/gateway.hpp>
 #include <feed/feed_reader.hpp>
+#include <feed/multicast_receiver.hpp>
+#include <feed/multicast_simulator.hpp>
 #include <feed/frame.hpp>
 #include <codec/lz4_codec.hpp>
 #include <mem/memory_pool.hpp>
@@ -10,6 +12,7 @@
 #include <trading/producer.hpp>
 #include <proto/protocols.hpp>
 #include <proto/sbe/decode.hpp>
+#include <proto/mcx/decode.hpp>
 #include <feed/shared_inlet_map.hpp>
 
 #include <array>
@@ -42,9 +45,9 @@ void append_itch_add_order(std::array<std::byte, hft::frame::kCapacity> &frame,
 }
 
 void append_mtbt_order(std::array<std::byte, hft::frame::kCapacity> &frame,
-                         std::size_t &offset, std::int16_t stream_id,
-                         std::int32_t token, std::int32_t quantity,
-                         std::int32_t price) {
+                       std::size_t &offset, std::int16_t stream_id,
+                       std::int32_t token, std::int32_t quantity,
+                       std::int32_t price) {
   hft::proto::MtbtStreamHeader header{};
   header.msg_len = static_cast<std::int16_t>(hft::proto::kMtbtOrderWireSize);
   header.stream_id = stream_id;
@@ -64,7 +67,8 @@ void append_mtbt_order(std::array<std::byte, hft::frame::kCapacity> &frame,
 
 void route_market_tick(const hft::proto::TaggedMessage &msg,
                        hft::trading::ItchProducer<kQueueCap, kQueueCap> &itch,
-                       hft::trading::MtbtProducer<kQueueCap, kQueueCap> &mtbt) {
+                       hft::trading::MtbtProducer<kQueueCap, kQueueCap> &mtbt,
+                       hft::trading::McxTobProducer<kQueueCap, kQueueCap> &mcx) {
   if (msg.kind == hft::proto::Kind::itch) {
     hft::proto::ItchAddOrder tick{};
     std::memcpy(&tick, msg.bytes.data(), sizeof(tick));
@@ -75,18 +79,72 @@ void route_market_tick(const hft::proto::TaggedMessage &msg,
     hft::proto::MtbtNewOrder tick{};
     std::memcpy(&tick, msg.bytes.data(), sizeof(tick));
     mtbt.on_tick(tick);
+    return;
+  }
+  if (msg.kind == hft::proto::Kind::mcx_market) {
+    hft::proto::mcx::TopOfBook tick{};
+    std::memcpy(&tick, msg.bytes.data(), sizeof(tick));
+    mcx.on_tick(tick);
   }
 }
 
 void drain_signals(hft::trading::OuchConsumer<kQueueCap, kQueueCap> &ouch,
                    hft::trading::NnfConsumer<kQueueCap, kQueueCap> &nnf,
-                   hft::trading::SbeOrderEntryConsumer<kQueueCap, kQueueCap> &sbe,
+                   hft::trading::McxOrderConsumer<kQueueCap, kQueueCap> &mcx,
                    std::size_t rounds) {
   for (std::size_t i = 0; i < rounds; ++i) {
     ouch.poll_once();
     nnf.poll_once();
-    sbe.poll_once();
+    mcx.poll_once();
   }
+}
+
+hft::proto::mcx::TopOfBook make_mcx_tob(std::int64_t bid, std::int64_t ask,
+                                        std::uint32_t security_id);
+
+void publish_feed_frames(hft::feed::SharedInlet &inlet,
+                         hft::feed::MulticastSimulator *simulator) {
+  std::array<std::byte, hft::frame::kCapacity> itch_frame{};
+  std::size_t itch_len = 0;
+  append_itch_add_order(itch_frame, itch_len, 10, 100, 10000);
+  append_itch_add_order(itch_frame, itch_len, 20, 100, 9980);
+
+  std::array<std::byte, hft::frame::kCapacity> mtbt_frame{};
+  std::size_t mtbt_len = 0;
+  append_mtbt_order(mtbt_frame, mtbt_len, 1, 111, 10, 250000);
+  append_mtbt_order(mtbt_frame, mtbt_len, 2, 222, 10, 251000);
+
+  const auto mcx_ref = make_mcx_tob(7200000, 7200100, 5001);
+  const auto mcx_buy = make_mcx_tob(7100000, 7100100, 5001);
+
+  if (simulator != nullptr) {
+    simulator->publish_itch(itch_frame.data(), itch_len);
+    simulator->publish_mtbt(mtbt_frame.data(), mtbt_len);
+    simulator->publish_mcx(reinterpret_cast<const std::byte *>(&mcx_ref),
+                           sizeof(mcx_ref));
+    simulator->publish_mcx(reinterpret_cast<const std::byte *>(&mcx_buy),
+                           sizeof(mcx_buy));
+    return;
+  }
+
+  const auto publish_and_wait = [&](hft::feed::Kind kind,
+                                    hft::feed::InletFlags flags,
+                                    const std::byte *data, std::size_t len,
+                                    std::uint32_t uncompressed_len = 0) {
+    hft::feed::publish(inlet, kind, flags, data, len, uncompressed_len);
+    const std::uint64_t sequence =
+        inlet.header.sequence.load(std::memory_order_acquire);
+    hft::feed::wait_until_processed(inlet, sequence);
+  };
+
+  publish_and_wait(hft::feed::Kind::itch, hft::feed::InletFlags::none,
+                   itch_frame.data(), itch_len);
+  publish_and_wait(hft::feed::Kind::mtbt, hft::feed::InletFlags::none,
+                   mtbt_frame.data(), mtbt_len);
+  publish_and_wait(hft::feed::Kind::mcx, hft::feed::InletFlags::none,
+                   reinterpret_cast<const std::byte *>(&mcx_ref), sizeof(mcx_ref));
+  publish_and_wait(hft::feed::Kind::mcx, hft::feed::InletFlags::none,
+                   reinterpret_cast<const std::byte *>(&mcx_buy), sizeof(mcx_buy));
 }
 
 void drain_gateway(hft::trading::ExchangeGateway<kQueueCap, kQueueCap> &gateway,
@@ -94,6 +152,19 @@ void drain_gateway(hft::trading::ExchangeGateway<kQueueCap, kQueueCap> &gateway,
   for (std::size_t i = 0; i < rounds; ++i) {
     gateway.poll_once();
   }
+}
+
+hft::proto::mcx::TopOfBook make_mcx_tob(std::int64_t bid, std::int64_t ask,
+                                        std::uint32_t security_id) {
+  hft::proto::mcx::TopOfBook tick{};
+  tick.simple_security_id = security_id;
+  tick.bid_price = bid;
+  tick.ask_price = ask;
+  tick.bid_qty = 10;
+  tick.ask_qty = 10;
+  const char *sym = "GOLD";
+  std::memcpy(tick.symbol, sym, 4);
+  return tick;
 }
 
 hft::proto::sbe::BestObRpi make_sbe_bbo(std::int64_t bid, std::int64_t ask,
@@ -130,25 +201,39 @@ int main() {
   new (inlet) hft::feed::SharedInlet{};
 
   hft::feed::Reader<1024, 1024, 1024, 256, kQueueCap> reader;
+  hft::feed::MulticastHub multicast_hub;
+  hft::feed::MulticastSimulator multicast_sim;
+
   reader.start(inlet, arena, market_queue);
 
-  std::array<std::byte, hft::frame::kCapacity> itch_frame{};
-  std::size_t itch_len = 0;
-  append_itch_add_order(itch_frame, itch_len, 10, 100, 10000);
-  append_itch_add_order(itch_frame, itch_len, 20, 100, 9980);
+  const bool multicast_ok =
+      multicast_hub.start(inlet) && multicast_sim.start();
 
-  hft::feed::publish(*inlet, hft::feed::Kind::itch, hft::feed::InletFlags::none,
-                     itch_frame.data(), itch_len);
-  hft::feed::wait_until_processed(*inlet, 1);
+  if (multicast_ok) {
+    publish_feed_frames(*inlet, &multicast_sim);
+    for (int i = 0; i < 100; ++i) {
+      if (multicast_hub.datagrams(hft::feed::MulticastChannel::itch) >= 1 &&
+          multicast_hub.datagrams(hft::feed::MulticastChannel::mtbt) >= 1 &&
+          multicast_hub.datagrams(hft::feed::MulticastChannel::mcx) >= 2) {
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  }
 
-  std::array<std::byte, hft::frame::kCapacity> mtbt_frame{};
-  std::size_t mtbt_len = 0;
-  append_mtbt_order(mtbt_frame, mtbt_len, 1, 111, 10, 250000);
-  append_mtbt_order(mtbt_frame, mtbt_len, 2, 222, 10, 251000);
+  const bool multicast_received =
+      multicast_ok &&
+      multicast_hub.datagrams(hft::feed::MulticastChannel::itch) >= 1 &&
+      multicast_hub.datagrams(hft::feed::MulticastChannel::mtbt) >= 1 &&
+      multicast_hub.datagrams(hft::feed::MulticastChannel::mcx) >= 2;
 
-  hft::feed::publish(*inlet, hft::feed::Kind::mtbt, hft::feed::InletFlags::none,
-                     mtbt_frame.data(), mtbt_len);
-  hft::feed::wait_until_processed(*inlet, 2);
+  if (multicast_ok) {
+    multicast_hub.stop();
+  }
+
+  if (!multicast_received) {
+    publish_feed_frames(*inlet, nullptr);
+  }
 
   std::array<std::byte, hft::frame::kCapacity> mtbt_plain{};
   std::size_t mtbt_plain_len = 0;
@@ -159,6 +244,7 @@ int main() {
   if (!hft::lz4::compress(mtbt_plain.data(), mtbt_plain_len, compressed.data(),
                           compressed.size(), compressed_len)) {
     reader.stop();
+    multicast_hub.stop();
     return 2;
   }
 
@@ -166,37 +252,57 @@ int main() {
                      hft::feed::InletFlags::lz4_compressed, compressed.data(),
                      compressed_len,
                      static_cast<std::uint32_t>(mtbt_plain_len));
-  hft::feed::wait_until_processed(*inlet, 3);
 
+  const std::uint64_t expected_sequences =
+      inlet->header.sequence.load(std::memory_order_acquire);
+  hft::feed::wait_until_processed(*inlet, expected_sequences);
+
+  std::printf(
+      "multicast ok: enabled=%d itch=%llu mtbt=%llu mcx=%llu sequences=%llu\n",
+      multicast_ok ? 1 : 0,
+      static_cast<unsigned long long>(
+          multicast_hub.datagrams(hft::feed::MulticastChannel::itch)),
+      static_cast<unsigned long long>(
+          multicast_hub.datagrams(hft::feed::MulticastChannel::mtbt)),
+      static_cast<unsigned long long>(
+          multicast_hub.datagrams(hft::feed::MulticastChannel::mcx)),
+      static_cast<unsigned long long>(expected_sequences));
+
+  if (multicast_ok) {
+    multicast_sim.stop();
+  }
   reader.stop();
 
   hft::trading::ItchProducer<kQueueCap, kQueueCap> itch_producer(market_queue,
                                                                  signal_queue);
   hft::trading::MtbtProducer<kQueueCap, kQueueCap> mtbt_producer(market_queue,
                                                                  signal_queue);
+  hft::trading::McxTobProducer<kQueueCap, kQueueCap> mcx_producer(market_queue,
+                                                                signal_queue);
   hft::trading::OuchConsumer<kQueueCap, kQueueCap> ouch_consumer(signal_queue,
                                                                  pending_queue);
   hft::trading::NnfConsumer<kQueueCap, kQueueCap> nnf_consumer(signal_queue,
                                                                pending_queue);
-  hft::trading::SbeOrderEntryConsumer<kQueueCap, kQueueCap> sbe_consumer(
-      signal_queue, pending_queue, 1001);
+  hft::trading::McxOrderConsumer<kQueueCap, kQueueCap> mcx_consumer(
+      signal_queue, pending_queue, 1, 5001);
   hft::trading::ExchangeGateway<kQueueCap, kQueueCap> gateway(pending_queue,
-                                                               confirm_queue);
+                                                             confirm_queue);
 
-  for (std::size_t i = 0; i < 16; ++i) {
+  for (std::size_t i = 0; i < 32; ++i) {
     hft::proto::TaggedMessage market_msg{};
     if (!market_queue.try_pop(market_msg)) {
       break;
     }
-    route_market_tick(market_msg, itch_producer, mtbt_producer);
+    route_market_tick(market_msg, itch_producer, mtbt_producer, mcx_producer);
   }
 
-  drain_signals(ouch_consumer, nnf_consumer, sbe_consumer, 16);
-  drain_gateway(gateway, 16);
+  drain_signals(ouch_consumer, nnf_consumer, mcx_consumer, 32);
+  drain_gateway(gateway, 32);
 
   std::size_t ouch_confirmed = 0;
   std::size_t nnf_confirmed = 0;
-  for (std::size_t i = 0; i < 16; ++i) {
+  std::size_t mcx_confirmed = 0;
+  for (std::size_t i = 0; i < 32; ++i) {
     hft::proto::TaggedMessage confirm{};
     if (!confirm_queue.try_pop(confirm)) {
       break;
@@ -205,17 +311,22 @@ int main() {
       ++ouch_confirmed;
     } else if (confirm.kind == hft::proto::Kind::nnf_confirm) {
       ++nnf_confirmed;
+    } else if (confirm.kind == hft::proto::Kind::mcx_confirm) {
+      ++mcx_confirmed;
     }
   }
 
   std::printf(
-      "strategy ok: itch_signals=%llu mtbt_signals=%llu "
-      "ouch_submitted=%llu nnf_submitted=%llu ouch_confirmed=%zu nnf_confirmed=%zu\n",
+      "strategy ok: itch=%llu mtbt=%llu mcx=%llu "
+      "ouch_sub=%llu nnf_sub=%llu mcx_sub=%llu "
+      "ouch_conf=%zu nnf_conf=%zu mcx_conf=%zu\n",
       static_cast<unsigned long long>(itch_producer.signals_emitted()),
       static_cast<unsigned long long>(mtbt_producer.signals_emitted()),
+      static_cast<unsigned long long>(mcx_producer.signals_emitted()),
       static_cast<unsigned long long>(ouch_consumer.orders_submitted()),
       static_cast<unsigned long long>(nnf_consumer.orders_submitted()),
-      ouch_confirmed, nnf_confirmed);
+      static_cast<unsigned long long>(mcx_consumer.orders_submitted()),
+      ouch_confirmed, nnf_confirmed, mcx_confirmed);
 
   hft::MPMC<kQueueCap> sbe_market_queue;
   hft::MPMC<kQueueCap> sbe_signal_queue;
@@ -271,46 +382,43 @@ int main() {
   }
 
   std::array<std::byte, 512> wire{};
-  const std::size_t wire_len =
-      hft::proto::sbe::encode_create_order_req(
-          [] {
-            hft::proto::sbe::CreateOrderReqV5 req{};
-            req.symbol_id = 1001;
-            req.side = hft::proto::sbe::SideType::buy;
-            req.qty.mantissa = 10;
-            req.price.mantissa = 65000;
-            return req;
-          }(),
-          wire.data(), wire.size());
+  const std::size_t wire_len = hft::proto::sbe::encode_create_order_req(
+      [] {
+        hft::proto::sbe::CreateOrderReqV5 req{};
+        req.symbol_id = 1001;
+        req.side = hft::proto::sbe::SideType::buy;
+        req.qty.mantissa = 10;
+        req.price.mantissa = 65000;
+        return req;
+      }(),
+      wire.data(), wire.size());
 
   hft::proto::sbe::CreateOrderReqV5 decoded_req{};
   const bool req_ok =
       hft::proto::sbe::decode_create_order_req(wire.data(), wire_len, decoded_req);
 
-  hft::proto::sbe::FastOrderResp fast{};
-  fast.body.category = 1;
-  fast.body.side = 1;
-  fast.body.price = 65000;
-  fast.body.leaves_qty = 10;
-  fast.body.symbol_id = 1001;
-  fast.order_id_len = 3;
-  std::memcpy(fast.order_id, "oid", 3);
-
-  std::array<std::byte, 256> fast_wire{};
-  const std::size_t fast_wire_len = hft::proto::sbe::encode_fast_order_resp(
-      fast, fast_wire.data(), fast_wire.size());
-
-  hft::proto::sbe::FastOrderResp decoded_fast{};
-  const bool fast_ok = hft::proto::sbe::decode_fast_order_resp(
-      fast_wire.data(), fast_wire_len, decoded_fast);
-
   std::printf(
       "sbe ok: bbo_signals=%llu submitted=%llu confirmed=%zu req_decode=%d "
-      "fast_decode=%d symbol_id=%lld\n",
+      "(ws/mmws path, not multicast)\n",
       static_cast<unsigned long long>(sbe_producer.signals_emitted()),
       static_cast<unsigned long long>(sbe_order_consumer.orders_submitted()),
-      sbe_confirmed, req_ok ? 1 : 0, fast_ok ? 1 : 0,
-      static_cast<long long>(decoded_req.symbol_id));
+      sbe_confirmed, req_ok ? 1 : 0);
+
+  std::array<std::byte, 256> mcx_wire{};
+  hft::proto::mcx::NewOrderSingleShort mcx_req{};
+  mcx_req.simple_security_id = 5001;
+  mcx_req.price = 7200000;
+  mcx_req.order_qty = 10;
+  mcx_req.cl_ord_id = 42;
+  const std::size_t mcx_wire_len = hft::proto::mcx::encode_new_order_short(
+      mcx_req, mcx_wire.data(), mcx_wire.size());
+
+  hft::proto::mcx::NewOrderSingleShort mcx_decoded{};
+  const bool mcx_req_ok = hft::proto::mcx::decode_new_order_short(
+      mcx_wire.data(), mcx_wire_len, mcx_decoded);
+
+  std::printf("mcx wire ok: req_decode=%d template_id=%u\n", mcx_req_ok ? 1 : 0,
+              static_cast<unsigned>(mcx_decoded.template_id));
 
   hft::mpmc::Runtime<kQueueCap> runtime(market_queue);
   runtime.start(12345);

@@ -13,6 +13,7 @@ add_executable(${MPMC_TARGET}
     src/main.cpp
     src/lz4_codec.cpp
     src/os_memory.cpp
+    src/udp_multicast.cpp
 )
 
 target_include_directories(${MPMC_TARGET} PRIVATE include)

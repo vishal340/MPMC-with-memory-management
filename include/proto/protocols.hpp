@@ -4,6 +4,8 @@
 #include <proto/sbe/fast_order.hpp>
 #include <proto/sbe/market.hpp>
 #include <proto/sbe/order_entry.hpp>
+#include <proto/mcx/confirm.hpp>
+#include <proto/mcx/order.hpp>
 
 #include <algorithm>
 #include <array>
@@ -206,6 +208,9 @@ enum class Kind : std::uint8_t {
   sbe_fast_order = 8,
   ouch_confirm = 9,
   nnf_confirm = 10,
+  mcx_market = 11,
+  mcx_order = 12,
+  mcx_confirm = 13,
 };
 
 enum class Side : std::int16_t { none = 0, buy = 1, sell = -1 };
@@ -249,6 +254,9 @@ static_assert(std::is_trivially_copyable_v<StrategySignal>);
 static_assert(sizeof(sbe::BestObRpi) == sbe::BestObRpi::kWireSize);
 static_assert(sizeof(sbe::CreateOrderReqV5) == sbe::CreateOrderReqV5::kWireSize);
 static_assert(sizeof(sbe::FastOrderResp) == sbe::FastOrderResp::kWireSize);
+static_assert(sizeof(mcx::NewOrderSingleShort) == mcx::NewOrderSingleShort::kWireSize);
+static_assert(sizeof(mcx::ExecutionReportNew) == mcx::ExecutionReportNew::kWireSize);
+static_assert(sizeof(mcx::TopOfBook) == mcx::TopOfBook::kWireSize);
 
 template <typename T>
 inline constexpr Kind kind_of = Kind::itch;
@@ -271,15 +279,21 @@ template <>
 inline constexpr Kind kind_of<sbe::CreateOrderReqV5> = Kind::sbe_order_entry;
 template <>
 inline constexpr Kind kind_of<sbe::FastOrderResp> = Kind::sbe_fast_order;
+template <>
+inline constexpr Kind kind_of<mcx::TopOfBook> = Kind::mcx_market;
+template <>
+inline constexpr Kind kind_of<mcx::NewOrderSingleShort> = Kind::mcx_order;
+template <>
+inline constexpr Kind kind_of<mcx::ExecutionReportNew> = Kind::mcx_confirm;
 
 inline constexpr bool is_order_confirm(Kind kind) noexcept {
   return kind == Kind::ouch_confirm || kind == Kind::nnf_confirm ||
-         kind == Kind::sbe_fast_order;
+         kind == Kind::sbe_fast_order || kind == Kind::mcx_confirm;
 }
 
 inline constexpr bool is_order_request(Kind kind) noexcept {
   return kind == Kind::ouch || kind == Kind::nnf ||
-         kind == Kind::sbe_order_entry;
+         kind == Kind::sbe_order_entry || kind == Kind::mcx_order;
 }
 
 inline constexpr std::size_t slot_size(Kind kind) noexcept {
@@ -304,6 +318,12 @@ inline constexpr std::size_t slot_size(Kind kind) noexcept {
     return sizeof(OuchOrderAccepted);
   case Kind::nnf_confirm:
     return sizeof(NnfOrderConfirm);
+  case Kind::mcx_market:
+    return sizeof(mcx::TopOfBook);
+  case Kind::mcx_order:
+    return sizeof(mcx::NewOrderSingleShort);
+  case Kind::mcx_confirm:
+    return sizeof(mcx::ExecutionReportNew);
   }
   return 0;
 }
@@ -313,7 +333,9 @@ inline constexpr std::size_t max_slot_size() noexcept {
                    sizeof(OuchOrderAccepted), sizeof(MtbtNewOrder),
                    sizeof(NnfOrderEntry), sizeof(NnfOrderConfirm),
                    sizeof(StrategySignal), sizeof(sbe::BestObRpi),
-                   sizeof(sbe::CreateOrderReqV5), sizeof(sbe::FastOrderResp)});
+                   sizeof(sbe::CreateOrderReqV5), sizeof(sbe::FastOrderResp),
+                   sizeof(mcx::NewOrderSingleShort),
+                   sizeof(mcx::ExecutionReportNew), sizeof(mcx::TopOfBook)});
 }
 
 template <typename T>
@@ -323,7 +345,10 @@ concept WireMessage =
     std::same_as<T, NnfOrderEntry> || std::same_as<T, NnfOrderConfirm> ||
     std::same_as<T, sbe::BestObRpi> ||
     std::same_as<T, sbe::CreateOrderReqV5> ||
-    std::same_as<T, sbe::FastOrderResp>;
+    std::same_as<T, sbe::FastOrderResp> ||
+    std::same_as<T, mcx::TopOfBook> ||
+    std::same_as<T, mcx::NewOrderSingleShort> ||
+    std::same_as<T, mcx::ExecutionReportNew>;
 
 struct TaggedMessage {
   Kind kind{Kind::itch};
