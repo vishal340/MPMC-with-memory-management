@@ -4,9 +4,14 @@
 #include <proto/protocols.hpp>
 
 #include <atomic>
-#include <cstdint>
 
+namespace hft {
+
+// Ring slot publishes ownership of a pooled TaggedMessage via an atomic pointer.
+// nullptr means the slot is empty. Payload bytes are never atomic.
 struct Node {
-  hft::proto::TaggedMessage message{};
-  std::atomic<std::uint8_t> state{0};
+  alignas(arch::cache_line_size) std::atomic<proto::TaggedMessage *> message{
+      nullptr};
 };
+
+} // namespace hft

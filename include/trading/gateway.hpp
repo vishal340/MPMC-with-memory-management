@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mem/memory_pool.hpp>
 #include <mpmc/mpmc.hpp>
 #include <proto/protocols.hpp>
 
@@ -17,8 +18,7 @@ inline void format_ouch_token(char (&out)[14], std::uint32_t token) noexcept {
   char tmp[16]{};
   std::snprintf(tmp, sizeof(tmp), "%u", token);
   const std::size_t len = std::strlen(tmp);
-  const std::size_t offset =
-      len >= sizeof(out) ? 0 : sizeof(out) - len;
+  const std::size_t offset = len >= sizeof(out) ? 0 : sizeof(out) - len;
   std::memcpy(out + offset, tmp, std::min(len, sizeof(out)));
 }
 
@@ -91,8 +91,7 @@ make_mcx_confirm(const proto::mcx::NewOrderSingleShort &req,
   ack.msg_seq_num = req.msg_seq_num;
   ack.order_id = order_id;
   ack.cl_ord_id = req.cl_ord_id;
-  ack.simple_security_id =
-      static_cast<std::int64_t>(req.simple_security_id);
+  ack.simple_security_id = static_cast<std::int64_t>(req.simple_security_id);
   ack.exec_id = exec_id;
   ack.ord_status = static_cast<char>(proto::mcx::OrdStatus::new_);
   ack.exec_type = static_cast<char>(proto::mcx::ExecType::new_);
@@ -102,83 +101,85 @@ make_mcx_confirm(const proto::mcx::NewOrderSingleShort &req,
 
 } // namespace detail
 
-template <int PendingCap, int ConfirmCap>
+template <int PendingCap, int ConfirmCap, std::size_t PoolCap>
 class ExchangeGateway {
 public:
   ExchangeGateway(hft::MPMC<PendingCap> &pending_queue,
-                  hft::MPMC<ConfirmCap> &confirm_queue) noexcept
-      : pending_queue_(pending_queue), confirm_queue_(confirm_queue) {}
+                  hft::MPMC<ConfirmCap> &confirm_queue,
+                  hft::mem::TaggedPool<PoolCap> &pool) noexcept
+      : pending_queue_(pending_queue), confirm_queue_(confirm_queue),
+        pool_(pool) {}
 
   [[nodiscard]] std::uint64_t confirms_emitted() const noexcept {
     return confirms_.load(std::memory_order_acquire);
   }
 
   void poll_once() noexcept {
-    proto::TaggedMessage pending{};
-    if (!pending_queue_.try_pop(pending)) {
+    proto::TaggedMessage *pending = nullptr;
+    if (!pending_queue_.try_pop(pending) || pending == nullptr) {
       return;
     }
 
-    proto::TaggedMessage confirm{};
-    switch (pending.kind) {
+    switch (pending->kind) {
     case proto::Kind::ouch: {
       proto::OuchEnterOrder req{};
-      std::memcpy(&req, pending.bytes.data(), sizeof(req));
+      std::memcpy(&req, pending->bytes.data(), sizeof(req));
       const auto order_ref =
           next_ouch_ref_.fetch_add(1, std::memory_order_relaxed);
       const proto::OuchOrderAccepted ack =
           detail::make_ouch_confirm(req, order_ref);
-      confirm.kind = proto::Kind::ouch_confirm;
-      std::memcpy(confirm.bytes.data(), &ack, sizeof(ack));
+      pending->kind = proto::Kind::ouch_confirm;
+      std::memcpy(pending->bytes.data(), &ack, sizeof(ack));
       break;
     }
     case proto::Kind::nnf: {
       proto::NnfOrderEntry req{};
-      std::memcpy(&req, pending.bytes.data(), sizeof(req));
-      const double order_number =
-          static_cast<double>(next_nnf_order_.fetch_add(
-              1, std::memory_order_relaxed));
+      std::memcpy(&req, pending->bytes.data(), sizeof(req));
+      const double order_number = static_cast<double>(
+          next_nnf_order_.fetch_add(1, std::memory_order_relaxed));
       const proto::NnfOrderConfirm ack =
           detail::make_nnf_confirm(req, order_number);
-      confirm.kind = proto::Kind::nnf_confirm;
-      std::memcpy(confirm.bytes.data(), &ack, sizeof(ack));
+      pending->kind = proto::Kind::nnf_confirm;
+      std::memcpy(pending->bytes.data(), &ack, sizeof(ack));
       break;
     }
     case proto::Kind::sbe_order_entry: {
       proto::sbe::CreateOrderReqV5 req{};
-      std::memcpy(&req, pending.bytes.data(), sizeof(req));
+      std::memcpy(&req, pending->bytes.data(), sizeof(req));
       const auto seq = static_cast<std::int64_t>(
           next_sbe_seq_.fetch_add(1, std::memory_order_relaxed));
       const proto::sbe::FastOrderResp ack =
           detail::make_sbe_fast_confirm(req, seq);
-      confirm.kind = proto::Kind::sbe_fast_order;
-      std::memcpy(confirm.bytes.data(), &ack, sizeof(ack));
+      pending->kind = proto::Kind::sbe_fast_order;
+      std::memcpy(pending->bytes.data(), &ack, sizeof(ack));
       break;
     }
     case proto::Kind::mcx_order: {
       proto::mcx::NewOrderSingleShort req{};
-      std::memcpy(&req, pending.bytes.data(), sizeof(req));
+      std::memcpy(&req, pending->bytes.data(), sizeof(req));
       const auto order_id =
           next_mcx_order_.fetch_add(1, std::memory_order_relaxed);
       const auto exec_id =
           next_mcx_exec_.fetch_add(1, std::memory_order_relaxed);
       const proto::mcx::ExecutionReportNew ack =
           detail::make_mcx_confirm(req, order_id, exec_id);
-      confirm.kind = proto::Kind::mcx_confirm;
-      std::memcpy(confirm.bytes.data(), &ack, sizeof(ack));
+      pending->kind = proto::Kind::mcx_confirm;
+      std::memcpy(pending->bytes.data(), &ack, sizeof(ack));
       break;
     }
     default:
+      pool_.release(pending);
       return;
     }
 
-    confirm_queue_.push(confirm);
+    confirm_queue_.push(pending);
     confirms_.fetch_add(1, std::memory_order_relaxed);
   }
 
 private:
   hft::MPMC<PendingCap> &pending_queue_;
   hft::MPMC<ConfirmCap> &confirm_queue_;
+  hft::mem::TaggedPool<PoolCap> &pool_;
   std::atomic<std::uint64_t> next_ouch_ref_{1};
   std::atomic<std::uint64_t> next_nnf_order_{1};
   std::atomic<std::uint64_t> next_sbe_seq_{1};

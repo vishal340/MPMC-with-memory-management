@@ -131,7 +131,7 @@ private:
       break;
     }
     const std::uint64_t sequence =
-        inlet_->header.sequence.load(std::memory_order_acquire);
+        inlet_->sequence.load(std::memory_order_acquire);
     wait_until_processed(*inlet_, sequence);
   }
 

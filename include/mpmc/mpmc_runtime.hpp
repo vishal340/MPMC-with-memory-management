@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mem/memory_pool.hpp>
 #include <mpmc/mpmc.hpp>
 #include <proto/protocols.hpp>
 
@@ -16,14 +17,13 @@
 
 namespace hft::mpmc {
 
-inline proto::TaggedMessage make_test_message(std::uint64_t sequence) {
-  proto::TaggedMessage msg{};
+inline void fill_test_message(proto::TaggedMessage &msg,
+                              std::uint64_t sequence) noexcept {
   msg.kind = proto::Kind::itch;
   proto::ItchAddOrder body{};
   body.stock_locate = static_cast<std::uint16_t>(sequence & 0xFFFFU);
   body.shares = static_cast<std::uint32_t>(sequence);
   std::memcpy(msg.bytes.data(), &body, sizeof(body));
-  return msg;
 }
 
 inline std::uint64_t sequence_from(const proto::TaggedMessage &msg) {
@@ -34,10 +34,11 @@ inline std::uint64_t sequence_from(const proto::TaggedMessage &msg) {
 
 enum class Role : std::uint8_t { producer, consumer };
 
-template <int Capacity>
+template <int Capacity, std::size_t PoolCap>
 class Runtime {
 public:
-  explicit Runtime(hft::MPMC<Capacity> &queue) : queue_(queue) {}
+  Runtime(hft::MPMC<Capacity> &queue, hft::mem::TaggedPool<PoolCap> &pool)
+      : queue_(queue), pool_(pool) {}
 
   Runtime(const Runtime &) = delete;
   Runtime &operator=(const Runtime &) = delete;
@@ -164,7 +165,12 @@ private:
     for (int i = 0; i < ops; ++i) {
       const std::uint64_t sequence =
           next_sequence_.fetch_add(1, std::memory_order_relaxed);
-      queue_.push(make_test_message(sequence));
+      proto::TaggedMessage *msg = pool_.acquire();
+      if (msg == nullptr) {
+        continue;
+      }
+      fill_test_message(*msg, sequence);
+      queue_.push(msg);
       pushed_.fetch_add(1, std::memory_order_relaxed);
       if (pause_dist(rng) > 0) {
         std::this_thread::sleep_for(std::chrono::microseconds(pause_dist(rng)));
@@ -184,9 +190,10 @@ private:
     const int ops = ops_dist(rng);
     int consumed = 0;
     while (consumed < ops) {
-      proto::TaggedMessage msg{};
-      if (queue_.try_pop(msg)) {
-        (void)sequence_from(msg);
+      proto::TaggedMessage *msg = nullptr;
+      if (queue_.try_pop(msg) && msg != nullptr) {
+        (void)sequence_from(*msg);
+        pool_.release(msg);
         popped_.fetch_add(1, std::memory_order_relaxed);
         ++consumed;
         if (pause_dist(rng) > 0) {
@@ -204,6 +211,7 @@ private:
   }
 
   hft::MPMC<Capacity> &queue_;
+  hft::mem::TaggedPool<PoolCap> &pool_;
   std::atomic<bool> running_{false};
   std::atomic<std::uint64_t> pushed_{0};
   std::atomic<std::uint64_t> popped_{0};

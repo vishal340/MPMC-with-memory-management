@@ -8,7 +8,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <type_traits>
 
 namespace hft::mem {
 
@@ -23,16 +22,19 @@ inline std::size_t index_of(const void *slot, const void *base,
 
 } // namespace detail
 
-template <proto::WireMessage T, std::size_t Capacity>
+// Pool of TaggedMessage bodies. Acquire/release synchronizes only the slot
+// state byte; message payloads are plain memory owned by the holder of the
+// pointer.
+template <std::size_t Capacity>
   requires(Capacity > 0)
-class TypedPool {
+class TaggedPool {
   struct alignas(arch::cache_line_size) Slot {
-    alignas(alignof(T)) std::byte storage[sizeof(T)]{};
+    proto::TaggedMessage message{};
     std::atomic<std::uint8_t> state{0}; // 0 = free, 1 = acquired
   };
 
 public:
-  TypedPool() {
+  TaggedPool() {
     constexpr std::size_t bytes = Capacity * sizeof(Slot);
     region_ = os::map(bytes, alignof(Slot));
     slots_ = static_cast<Slot *>(region_.data());
@@ -42,32 +44,47 @@ public:
     }
   }
 
-  TypedPool(const TypedPool &) = delete;
-  TypedPool &operator=(const TypedPool &) = delete;
+  TaggedPool(const TaggedPool &) = delete;
+  TaggedPool &operator=(const TaggedPool &) = delete;
 
-  [[nodiscard]] T *acquire() noexcept {
+  [[nodiscard]] proto::TaggedMessage *acquire() noexcept {
     for (std::size_t i = 0; i < Capacity; ++i) {
       std::uint8_t expected = 0;
       if (slots_[i].state.compare_exchange_weak(expected, 1,
                                                 std::memory_order_acquire,
                                                 std::memory_order_relaxed)) {
-        return reinterpret_cast<T *>(slots_[i].storage);
+        slots_[i].message.kind = proto::Kind::itch;
+        std::memset(slots_[i].message.bytes.data(), 0,
+                    slots_[i].message.bytes.size());
+        return &slots_[i].message;
       }
     }
     return nullptr;
   }
 
-  void release(T *object) noexcept {
-    if (object == nullptr) {
+  void release(proto::TaggedMessage *message) noexcept {
+    if (message == nullptr) {
       return;
     }
 
-    const std::size_t index = detail::index_of(object, slots_, sizeof(Slot));
+    const std::size_t index =
+        detail::index_of(message, &slots_[0].message, sizeof(Slot));
     if (index >= Capacity) {
       return;
     }
 
     slots_[index].state.store(0, std::memory_order_release);
+  }
+
+  template <proto::WireMessage T>
+  [[nodiscard]] proto::TaggedMessage *acquire_filled(const T &src) noexcept {
+    proto::TaggedMessage *slot = acquire();
+    if (slot == nullptr) {
+      return nullptr;
+    }
+    slot->kind = proto::kind_of<T>;
+    std::memcpy(slot->bytes.data(), &src, sizeof(src));
+    return slot;
   }
 
   [[nodiscard]] std::size_t capacity() const noexcept { return Capacity; }
@@ -76,87 +93,6 @@ public:
 private:
   os::Region region_{};
   Slot *slots_{nullptr};
-};
-
-template <std::size_t ItchCap, std::size_t OuchCap, std::size_t MtbtCap,
-          std::size_t NnfCap>
-class ProtocolArena {
-public:
-  [[nodiscard]] proto::ItchAddOrder *acquire_itch() noexcept {
-    return itch_.acquire();
-  }
-  void release(proto::ItchAddOrder *msg) noexcept { itch_.release(msg); }
-
-  [[nodiscard]] proto::OuchEnterOrder *acquire_ouch() noexcept {
-    return ouch_.acquire();
-  }
-  void release(proto::OuchEnterOrder *msg) noexcept { ouch_.release(msg); }
-
-  [[nodiscard]] proto::MtbtNewOrder *acquire_mtbt() noexcept {
-    return mtbt_.acquire();
-  }
-  void release(proto::MtbtNewOrder *msg) noexcept { mtbt_.release(msg); }
-
-  [[nodiscard]] proto::NnfOrderEntry *acquire_nnf() noexcept {
-    return nnf_.acquire();
-  }
-  void release(proto::NnfOrderEntry *msg) noexcept { nnf_.release(msg); }
-
-  template <proto::WireMessage T> [[nodiscard]] T *acquire() noexcept {
-    if constexpr (std::same_as<T, proto::ItchAddOrder>) {
-      return acquire_itch();
-    } else if constexpr (std::same_as<T, proto::OuchEnterOrder>) {
-      return acquire_ouch();
-    } else if constexpr (std::same_as<T, proto::MtbtNewOrder>) {
-      return acquire_mtbt();
-    } else if constexpr (std::same_as<T, proto::NnfOrderEntry>) {
-      return acquire_nnf();
-    } else {
-      return nullptr;
-    }
-  }
-
-  template <proto::WireMessage T> void release(T *msg) noexcept {
-    if constexpr (std::same_as<T, proto::ItchAddOrder>) {
-      itch_.release(msg);
-    } else if constexpr (std::same_as<T, proto::OuchEnterOrder>) {
-      ouch_.release(msg);
-    } else if constexpr (std::same_as<T, proto::MtbtNewOrder>) {
-      mtbt_.release(msg);
-    } else if constexpr (std::same_as<T, proto::NnfOrderEntry>) {
-      nnf_.release(msg);
-    }
-  }
-
-  void copy_to_tagged(const proto::ItchAddOrder &src,
-                      proto::TaggedMessage &dst) noexcept {
-    dst.kind = proto::Kind::itch;
-    std::memcpy(dst.bytes.data(), &src, sizeof(src));
-  }
-
-  void copy_to_tagged(const proto::OuchEnterOrder &src,
-                      proto::TaggedMessage &dst) noexcept {
-    dst.kind = proto::Kind::ouch;
-    std::memcpy(dst.bytes.data(), &src, sizeof(src));
-  }
-
-  void copy_to_tagged(const proto::MtbtNewOrder &src,
-                      proto::TaggedMessage &dst) noexcept {
-    dst.kind = proto::Kind::mtbt;
-    std::memcpy(dst.bytes.data(), &src, sizeof(src));
-  }
-
-  void copy_to_tagged(const proto::NnfOrderEntry &src,
-                      proto::TaggedMessage &dst) noexcept {
-    dst.kind = proto::Kind::nnf;
-    std::memcpy(dst.bytes.data(), &src, sizeof(src));
-  }
-
-private:
-  TypedPool<proto::ItchAddOrder, ItchCap> itch_{};
-  TypedPool<proto::OuchEnterOrder, OuchCap> ouch_{};
-  TypedPool<proto::MtbtNewOrder, MtbtCap> mtbt_{};
-  TypedPool<proto::NnfOrderEntry, NnfCap> nnf_{};
 };
 
 } // namespace hft::mem

@@ -12,12 +12,11 @@
 
 namespace hft::ingress {
 
-template <std::size_t ItchCap, std::size_t OuchCap, std::size_t MtbtCap,
-          std::size_t NnfCap, int QueueCap>
-[[nodiscard]] inline frame::Stats ingest_itch_frame(
-    const std::byte *frame, std::size_t len,
-    hft::mem::ProtocolArena<ItchCap, OuchCap, MtbtCap, NnfCap> &arena,
-    hft::MPMC<QueueCap> &queue) noexcept {
+template <std::size_t PoolCap, int QueueCap>
+[[nodiscard]] inline frame::Stats
+ingest_itch_frame(const std::byte *frame, std::size_t len,
+                  hft::mem::TaggedPool<PoolCap> &pool,
+                  hft::MPMC<QueueCap> &queue) noexcept {
   return hft::proto::split_itch_frame(
       frame, len,
       [&](const std::byte *body, std::size_t body_len) noexcept -> bool {
@@ -26,27 +25,20 @@ template <std::size_t ItchCap, std::size_t OuchCap, std::size_t MtbtCap,
           return false;
         }
 
-        auto *slot = arena.acquire_itch();
+        auto *slot = pool.acquire_filled(decoded);
         if (slot == nullptr) {
           return false;
         }
-        *slot = decoded;
-
-        hft::proto::TaggedMessage tagged{};
-        arena.copy_to_tagged(*slot, tagged);
-        arena.release(slot);
-
-        queue.push(tagged);
+        queue.push(slot);
         return true;
       });
 }
 
-template <std::size_t ItchCap, std::size_t OuchCap, std::size_t MtbtCap,
-          std::size_t NnfCap, int QueueCap>
-[[nodiscard]] inline frame::Stats ingest_mtbt_frame(
-    const std::byte *frame, std::size_t len,
-    hft::mem::ProtocolArena<ItchCap, OuchCap, MtbtCap, NnfCap> &arena,
-    hft::MPMC<QueueCap> &queue) noexcept {
+template <std::size_t PoolCap, int QueueCap>
+[[nodiscard]] inline frame::Stats
+ingest_mtbt_frame(const std::byte *frame, std::size_t len,
+                  hft::mem::TaggedPool<PoolCap> &pool,
+                  hft::MPMC<QueueCap> &queue) noexcept {
   return hft::proto::split_mtbt_frame(
       frame, len,
       [&](const std::byte *packet, std::size_t packet_len,
@@ -58,25 +50,20 @@ template <std::size_t ItchCap, std::size_t OuchCap, std::size_t MtbtCap,
           return false;
         }
 
-        auto *slot = arena.acquire_mtbt();
+        auto *slot = pool.acquire_filled(decoded.order);
         if (slot == nullptr) {
           return false;
         }
-        *slot = decoded.order;
-
-        hft::proto::TaggedMessage tagged{};
-        arena.copy_to_tagged(*slot, tagged);
-        arena.release(slot);
-
-        queue.push(tagged);
+        queue.push(slot);
         return true;
       });
 }
 
-template <int QueueCap>
-[[nodiscard]] inline frame::Stats ingest_mcx_tob_frame(
-    const std::byte *frame, std::size_t len,
-    hft::MPMC<QueueCap> &queue) noexcept {
+template <std::size_t PoolCap, int QueueCap>
+[[nodiscard]] inline frame::Stats
+ingest_mcx_tob_frame(const std::byte *frame, std::size_t len,
+                     hft::mem::TaggedPool<PoolCap> &pool,
+                     hft::MPMC<QueueCap> &queue) noexcept {
   frame::Stats stats{};
   if (frame == nullptr || len != hft::proto::mcx::TopOfBook::kWireSize) {
     return stats;
@@ -85,10 +72,11 @@ template <int QueueCap>
   hft::proto::mcx::TopOfBook tick{};
   std::memcpy(&tick, frame, sizeof(tick));
 
-  hft::proto::TaggedMessage tagged{};
-  tagged.kind = hft::proto::Kind::mcx_market;
-  std::memcpy(tagged.bytes.data(), &tick, sizeof(tick));
-  queue.push(tagged);
+  auto *slot = pool.acquire_filled(tick);
+  if (slot == nullptr) {
+    return stats;
+  }
+  queue.push(slot);
 
   stats.saved = 1;
   stats.consumed = len;

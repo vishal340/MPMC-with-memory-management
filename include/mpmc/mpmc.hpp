@@ -27,71 +27,57 @@ public:
 
     for (int i = 0; i < Capacity; ++i) {
       (void)os::placement_construct<Node>(&ring_[i]);
-      ring_[i].state.store(0, std::memory_order_relaxed);
+      ring_[i].message.store(nullptr, std::memory_order_relaxed);
     }
   }
 
   MPMC(const MPMC &) = delete;
   MPMC &operator=(const MPMC &) = delete;
 
-  void push(const proto::TaggedMessage &message) {
+  // Transfers ownership of message into the ring. message must be non-null.
+  void push(proto::TaggedMessage *message) {
+    if (message == nullptr) {
+      return;
+    }
+
     int slot = post_cursor_.fetch_add(1, std::memory_order_relaxed) & kMask;
-    std::uint8_t expected = 0;
+    proto::TaggedMessage *expected = nullptr;
     while (true) {
-      if (ring_[slot].state.compare_exchange_weak(
-              expected, 2, std::memory_order_acquire,
+      if (ring_[slot].message.compare_exchange_weak(
+              expected, message, std::memory_order_release,
               std::memory_order_relaxed)) {
-        ring_[slot].message = message;
-        ring_[slot].state.store(1, std::memory_order_release);
         return;
       }
-      if (expected == 2) {
-        slot = (slot + 1) & kMask;
-        expected = 0;
-      } else if (expected == 1) {
-        slot = (slot + 1) & kMask;
-        expected = 0;
-      } else {
-        cpu_pause();
-        expected = 0;
-      }
+      // Slot occupied — probe next.
+      slot = (slot + 1) & kMask;
+      expected = nullptr;
+      cpu_pause();
     }
   }
 
-  [[nodiscard]] proto::TaggedMessage pop() {
+  // Blocks until a message is available. Caller owns the returned pointer.
+  [[nodiscard]] proto::TaggedMessage *pop() {
     int slot = pop_cursor_.fetch_add(1, std::memory_order_relaxed) & kMask;
-    std::uint8_t expected = 1;
     while (true) {
-      if (ring_[slot].state.compare_exchange_weak(
-              expected, 3, std::memory_order_acquire,
-              std::memory_order_relaxed)) {
-        proto::TaggedMessage ret = ring_[slot].message;
-        ring_[slot].state.store(0, std::memory_order_release);
-        return ret;
+      proto::TaggedMessage *message =
+          ring_[slot].message.exchange(nullptr, std::memory_order_acquire);
+      if (message != nullptr) {
+        return message;
       }
-      if (expected == 3) {
-        slot = (slot + 1) & kMask;
-        expected = 1;
-      } else if (expected == 0) {
-        slot = (slot + 1) & kMask;
-        expected = 1;
-      } else {
-        cpu_pause();
-        expected = 1;
-      }
+      slot = (slot + 1) & kMask;
+      cpu_pause();
     }
   }
 
-  [[nodiscard]] bool try_pop(proto::TaggedMessage &out) {
+  // Non-blocking take. On success, caller owns *out.
+  [[nodiscard]] bool try_pop(proto::TaggedMessage *&out) {
     int slot = pop_cursor_.load(std::memory_order_relaxed);
     for (int probe = 0; probe < Capacity; ++probe) {
       const int idx = (slot + probe) & kMask;
-      std::uint8_t expected = 1;
-      if (ring_[idx].state.compare_exchange_weak(
-              expected, 3, std::memory_order_acquire,
-              std::memory_order_relaxed)) {
-        out = ring_[idx].message;
-        ring_[idx].state.store(0, std::memory_order_release);
+      proto::TaggedMessage *message =
+          ring_[idx].message.exchange(nullptr, std::memory_order_acquire);
+      if (message != nullptr) {
+        out = message;
         pop_cursor_.store((idx + 1) & kMask, std::memory_order_relaxed);
         return true;
       }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mem/memory_pool.hpp>
 #include <mpmc/mpmc.hpp>
 #include <proto/protocols.hpp>
 #include <trading/strategy.hpp>
@@ -7,29 +8,40 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 
 namespace hft::trading {
 
-template <int SignalCap, int PendingCap>
+template <int SignalCap, int PendingCap, std::size_t PoolCap>
 class OuchConsumer {
 public:
   OuchConsumer(hft::MPMC<SignalCap> &signal_queue,
-               hft::MPMC<PendingCap> &pending_queue) noexcept
-      : signal_queue_(signal_queue), pending_queue_(pending_queue) {}
+               hft::MPMC<PendingCap> &pending_queue,
+               hft::mem::TaggedPool<PoolCap> &pool) noexcept
+      : signal_queue_(signal_queue), pending_queue_(pending_queue), pool_(pool) {
+  }
 
   [[nodiscard]] std::uint64_t orders_submitted() const noexcept {
     return submitted_.load(std::memory_order_acquire);
   }
 
   void poll_once() noexcept {
-    hft::proto::TaggedMessage msg{};
-    if (!signal_queue_.try_pop(msg) || msg.kind != hft::proto::Kind::signal) {
+    hft::proto::TaggedMessage *msg = nullptr;
+    if (!signal_queue_.try_pop(msg) || msg == nullptr ||
+        msg->kind != hft::proto::Kind::signal) {
+      if (msg != nullptr) {
+        pool_.release(msg);
+      }
       return;
     }
 
-    const hft::proto::StrategySignal signal = strategy::decode_signal(msg);
-    if (signal.feed != hft::proto::Kind::itch ||
-        signal.side == hft::proto::Side::none) {
+    const hft::proto::StrategySignal signal = strategy::decode_signal(*msg);
+    if (signal.feed != hft::proto::Kind::itch) {
+      signal_queue_.push(msg);
+      return;
+    }
+    if (signal.side == hft::proto::Side::none) {
+      pool_.release(msg);
       return;
     }
 
@@ -42,26 +54,27 @@ public:
     order.time_in_force = 0;
     std::memcpy(order.stock, signal.stock, sizeof(order.stock));
 
-    hft::proto::TaggedMessage out{};
-    out.kind = hft::proto::Kind::ouch;
-    std::memcpy(out.bytes.data(), &order, sizeof(order));
-    pending_queue_.push(out);
+    msg->kind = hft::proto::Kind::ouch;
+    std::memcpy(msg->bytes.data(), &order, sizeof(order));
+    pending_queue_.push(msg);
     submitted_.fetch_add(1, std::memory_order_relaxed);
   }
 
 private:
   hft::MPMC<SignalCap> &signal_queue_;
   hft::MPMC<PendingCap> &pending_queue_;
+  hft::mem::TaggedPool<PoolCap> &pool_;
   std::atomic<std::uint64_t> submitted_{0};
 };
 
-template <int SignalCap, int PendingCap>
+template <int SignalCap, int PendingCap, std::size_t PoolCap>
 class NnfConsumer {
 public:
   NnfConsumer(hft::MPMC<SignalCap> &signal_queue,
               hft::MPMC<PendingCap> &pending_queue,
+              hft::mem::TaggedPool<PoolCap> &pool,
               std::int32_t trader_id = 1) noexcept
-      : signal_queue_(signal_queue), pending_queue_(pending_queue),
+      : signal_queue_(signal_queue), pending_queue_(pending_queue), pool_(pool),
         trader_id_(trader_id) {}
 
   [[nodiscard]] std::uint64_t orders_submitted() const noexcept {
@@ -69,14 +82,22 @@ public:
   }
 
   void poll_once() noexcept {
-    hft::proto::TaggedMessage msg{};
-    if (!signal_queue_.try_pop(msg) || msg.kind != hft::proto::Kind::signal) {
+    hft::proto::TaggedMessage *msg = nullptr;
+    if (!signal_queue_.try_pop(msg) || msg == nullptr ||
+        msg->kind != hft::proto::Kind::signal) {
+      if (msg != nullptr) {
+        pool_.release(msg);
+      }
       return;
     }
 
-    const hft::proto::StrategySignal signal = strategy::decode_signal(msg);
-    if (signal.feed != hft::proto::Kind::mtbt ||
-        signal.side == hft::proto::Side::none) {
+    const hft::proto::StrategySignal signal = strategy::decode_signal(*msg);
+    if (signal.feed != hft::proto::Kind::mtbt) {
+      signal_queue_.push(msg);
+      return;
+    }
+    if (signal.side == hft::proto::Side::none) {
+      pool_.release(msg);
       return;
     }
 
@@ -93,27 +114,28 @@ public:
       order.transaction_id = signal.token;
     }
 
-    hft::proto::TaggedMessage out{};
-    out.kind = hft::proto::Kind::nnf;
-    std::memcpy(out.bytes.data(), &order, sizeof(order));
-    pending_queue_.push(out);
+    msg->kind = hft::proto::Kind::nnf;
+    std::memcpy(msg->bytes.data(), &order, sizeof(order));
+    pending_queue_.push(msg);
     submitted_.fetch_add(1, std::memory_order_relaxed);
   }
 
 private:
   hft::MPMC<SignalCap> &signal_queue_;
   hft::MPMC<PendingCap> &pending_queue_;
+  hft::mem::TaggedPool<PoolCap> &pool_;
   std::int32_t trader_id_{1};
   std::atomic<std::uint64_t> submitted_{0};
 };
 
-template <int SignalCap, int PendingCap>
+template <int SignalCap, int PendingCap, std::size_t PoolCap>
 class SbeOrderEntryConsumer {
 public:
   SbeOrderEntryConsumer(hft::MPMC<SignalCap> &signal_queue,
                         hft::MPMC<PendingCap> &pending_queue,
+                        hft::mem::TaggedPool<PoolCap> &pool,
                         std::int64_t symbol_id = 1) noexcept
-      : signal_queue_(signal_queue), pending_queue_(pending_queue),
+      : signal_queue_(signal_queue), pending_queue_(pending_queue), pool_(pool),
         symbol_id_(symbol_id) {}
 
   [[nodiscard]] std::uint64_t orders_submitted() const noexcept {
@@ -121,14 +143,22 @@ public:
   }
 
   void poll_once() noexcept {
-    hft::proto::TaggedMessage msg{};
-    if (!signal_queue_.try_pop(msg) || msg.kind != hft::proto::Kind::signal) {
+    hft::proto::TaggedMessage *msg = nullptr;
+    if (!signal_queue_.try_pop(msg) || msg == nullptr ||
+        msg->kind != hft::proto::Kind::signal) {
+      if (msg != nullptr) {
+        pool_.release(msg);
+      }
       return;
     }
 
-    const hft::proto::StrategySignal signal = strategy::decode_signal(msg);
-    if (signal.feed != hft::proto::Kind::sbe_market ||
-        signal.side == hft::proto::Side::none) {
+    const hft::proto::StrategySignal signal = strategy::decode_signal(*msg);
+    if (signal.feed != hft::proto::Kind::sbe_market) {
+      signal_queue_.push(msg);
+      return;
+    }
+    if (signal.side == hft::proto::Side::none) {
+      pool_.release(msg);
       return;
     }
 
@@ -147,43 +177,53 @@ public:
     std::snprintf(order.order_link_id, sizeof(order.order_link_id), "lnk%u",
                   signal.order_token);
 
-    hft::proto::TaggedMessage out{};
-    out.kind = hft::proto::Kind::sbe_order_entry;
-    std::memcpy(out.bytes.data(), &order, sizeof(order));
-    pending_queue_.push(out);
+    msg->kind = hft::proto::Kind::sbe_order_entry;
+    std::memcpy(msg->bytes.data(), &order, sizeof(order));
+    pending_queue_.push(msg);
     submitted_.fetch_add(1, std::memory_order_relaxed);
   }
 
 private:
   hft::MPMC<SignalCap> &signal_queue_;
   hft::MPMC<PendingCap> &pending_queue_;
+  hft::mem::TaggedPool<PoolCap> &pool_;
   std::int64_t symbol_id_{1};
   std::atomic<std::uint64_t> submitted_{0};
 };
 
-template <int SignalCap, int PendingCap>
+template <int SignalCap, int PendingCap, std::size_t PoolCap>
 class McxOrderConsumer {
 public:
   McxOrderConsumer(hft::MPMC<SignalCap> &signal_queue,
                    hft::MPMC<PendingCap> &pending_queue,
+                   hft::mem::TaggedPool<PoolCap> &pool,
                    std::uint32_t sender_sub_id = 1,
                    std::uint32_t simple_security_id = 5001) noexcept
-      : signal_queue_(signal_queue), pending_queue_(pending_queue),
-        sender_sub_id_(sender_sub_id), simple_security_id_(simple_security_id) {}
+      : signal_queue_(signal_queue), pending_queue_(pending_queue), pool_(pool),
+        sender_sub_id_(sender_sub_id), simple_security_id_(simple_security_id) {
+  }
 
   [[nodiscard]] std::uint64_t orders_submitted() const noexcept {
     return submitted_.load(std::memory_order_acquire);
   }
 
   void poll_once() noexcept {
-    hft::proto::TaggedMessage msg{};
-    if (!signal_queue_.try_pop(msg) || msg.kind != hft::proto::Kind::signal) {
+    hft::proto::TaggedMessage *msg = nullptr;
+    if (!signal_queue_.try_pop(msg) || msg == nullptr ||
+        msg->kind != hft::proto::Kind::signal) {
+      if (msg != nullptr) {
+        pool_.release(msg);
+      }
       return;
     }
 
-    const hft::proto::StrategySignal signal = strategy::decode_signal(msg);
-    if (signal.feed != hft::proto::Kind::mcx_market ||
-        signal.side == hft::proto::Side::none) {
+    const hft::proto::StrategySignal signal = strategy::decode_signal(*msg);
+    if (signal.feed != hft::proto::Kind::mcx_market) {
+      signal_queue_.push(msg);
+      return;
+    }
+    if (signal.side == hft::proto::Side::none) {
+      pool_.release(msg);
       return;
     }
 
@@ -207,16 +247,16 @@ public:
                               strnlen(signal.symbol, sizeof(signal.symbol)));
     std::memcpy(order.free_text1, signal.symbol, ucc_len);
 
-    hft::proto::TaggedMessage out{};
-    out.kind = hft::proto::Kind::mcx_order;
-    std::memcpy(out.bytes.data(), &order, sizeof(order));
-    pending_queue_.push(out);
+    msg->kind = hft::proto::Kind::mcx_order;
+    std::memcpy(msg->bytes.data(), &order, sizeof(order));
+    pending_queue_.push(msg);
     submitted_.fetch_add(1, std::memory_order_relaxed);
   }
 
 private:
   hft::MPMC<SignalCap> &signal_queue_;
   hft::MPMC<PendingCap> &pending_queue_;
+  hft::mem::TaggedPool<PoolCap> &pool_;
   std::uint32_t sender_sub_id_{1};
   std::uint32_t simple_security_id_{5001};
   std::atomic<std::uint32_t> next_seq_{1};

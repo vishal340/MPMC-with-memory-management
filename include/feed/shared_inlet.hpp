@@ -39,50 +39,70 @@ constexpr bool has_flag(InletFlags flags, InletFlags flag) noexcept {
   return (flags & flag) == flag;
 }
 
-// Layout written by an external producer (another process, FPGA shim, etc.).
-// Writer stores payload + metadata, then publishes with sequence.fetch_add(1).
-struct SharedInletHeader {
+// Plain frame body — never accessed through atomics.
+struct FrameSlot {
   static constexpr std::uint32_t kMagic = 0x48465449; // 'HFTI'
 
-  std::atomic<std::uint64_t> sequence{0};
-  std::atomic<std::uint64_t> processed{0};
   std::uint32_t magic{kMagic};
   std::uint32_t payload_len{0};
   Kind kind{Kind::none};
   InletFlags flags{InletFlags::none};
   std::uint32_t uncompressed_len{0};
   std::uint32_t reserved{0};
-};
-
-struct SharedInlet {
-  SharedInletHeader header{};
   alignas(arch::cache_line_size)
       std::array<std::byte, frame::kCapacity> payload{};
 };
 
+// Double-buffered inlet: writer fills the inactive slot, then publishes an
+// atomic index. Readers load that index and read the plain FrameSlot.
+struct SharedInlet {
+  static constexpr std::size_t kSlots = 2;
+
+  std::atomic<std::uint64_t> sequence{0};
+  std::atomic<std::uint64_t> processed{0};
+  // Index of the slot that is safe to read after observing sequence.
+  std::atomic<std::uint32_t> published{0};
+  std::array<FrameSlot, kSlots> slots{};
+};
+
 inline constexpr std::size_t kSharedInletMappedSize = sizeof(SharedInlet);
 
-inline void wait_until_processed(const SharedInlet& inlet,
+inline void wait_until_processed(const SharedInlet &inlet,
                                  std::uint64_t sequence) noexcept {
-  while (inlet.header.processed.load(std::memory_order_acquire) < sequence) {
+  while (inlet.processed.load(std::memory_order_acquire) < sequence) {
     cpu_pause();
   }
 }
 
-inline void publish(SharedInlet& inlet, Kind kind, InletFlags flags,
-                    const std::byte* data, std::size_t len,
+[[nodiscard]] inline const FrameSlot *
+published_slot(const SharedInlet &inlet) noexcept {
+  const std::uint32_t index =
+      inlet.published.load(std::memory_order_acquire) % SharedInlet::kSlots;
+  return &inlet.slots[index];
+}
+
+inline void publish(SharedInlet &inlet, Kind kind, InletFlags flags,
+                    const std::byte *data, std::size_t len,
                     std::uint32_t uncompressed_len = 0) noexcept {
-  if (data == nullptr || len > inlet.payload.size()) {
+  if (data == nullptr || len > frame::kCapacity) {
     return;
   }
 
-  inlet.header.magic = SharedInletHeader::kMagic;
-  inlet.header.kind = kind;
-  inlet.header.flags = flags;
-  inlet.header.payload_len = static_cast<std::uint32_t>(len);
-  inlet.header.uncompressed_len = uncompressed_len;
-  std::memcpy(inlet.payload.data(), data, len);
-  inlet.header.sequence.fetch_add(1, std::memory_order_release);
+  const std::uint32_t current =
+      inlet.published.load(std::memory_order_relaxed) % SharedInlet::kSlots;
+  const std::uint32_t write = 1U - current;
+  FrameSlot &slot = inlet.slots[write];
+
+  slot.magic = FrameSlot::kMagic;
+  slot.kind = kind;
+  slot.flags = flags;
+  slot.payload_len = static_cast<std::uint32_t>(len);
+  slot.uncompressed_len = uncompressed_len;
+  slot.reserved = 0;
+  std::memcpy(slot.payload.data(), data, len);
+
+  inlet.published.store(write, std::memory_order_release);
+  inlet.sequence.fetch_add(1, std::memory_order_release);
 }
 
 } // namespace hft::feed
